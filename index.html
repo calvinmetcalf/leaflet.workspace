@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
+    <meta name="viewport" content="width=1024, user-scalable=no">
+    <style>
+      html { height: 100% }
+      body { height: 100%; margin: 0; padding: 0;}
+      #map{ height: 100% }
+      
+      .upStuff{
+      	display:none;
+      }
+    </style>
+    <link rel="stylesheet" href="css/bootstrap.css" />
+<link rel="stylesheet" href="http://cdn.leafletjs.com/leaflet-0.5.1/leaflet.css" />
+<!--[if lte IE 8]>
+    <link rel="stylesheet" href="http://cdn.leafletjs.com/leaflet-0.5.1/leaflet.ie.css" />
+<![endif]-->
+
+
+
+
+<title>Leaflet</title></head><body>
+<div id="map"></div>
+
+<script src="colorbrewer.js"></script>
+<script src="http://cdn.leafletjs.com/leaflet-0.5.1/leaflet-src.js"></script>
+<!--[if IE]>
+   <script src="ddr-ecma5-min.js"></script>
+<![endif]-->
+
+<script>
+var m = L.map("map",{zoomControl:false}).setView([42.3164, -71.6803],9);
+
+//make the map
+var options = {
+	onEachFeature:function(feature, layer) {
+		if (feature.properties) {
+			layer.bindPopup(Object.keys(feature.properties).map(function(k){
+				return k + ": " + feature.properties[k] ;
+			}).join("<br />"));
+    	}
+	}
+};
+L.layerGroup([
+	L.tileLayer("http://{s}.tile.stamen.com/terrain-background/{z}/{x}/{y}.jpg",{minZoom:4,maxZoom:18}),
+	L.tileLayer("http://{s}.tile.stamen.com/terrain-lines/{z}/{x}/{y}.png",{minZoom:4,maxZoom:18,attribution:'Map tiles by <a href="http://stamen.com">Stamen Design</a>, <a href="http://creativecommons.org/licenses/by/3.0">CC BY 3.0</a> &mdash; Map data &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors, <a href="http://creativecommons.org/licenses/by-sa/2.0/">CC-BY-SA</a>'})
+	]).addTo(m);
+
+var NewButton= L.Control.extend({//creating the buttons
+    options: {
+        position: 'topleft'
+    },
+    onAdd: function (map) {
+        // create the control container with a particular class name
+        var div = L.DomUtil.create('form','bgroup');
+        var upButton = L.DomUtil.create('input', 'upStuff',div);
+        upButton.type="file";
+       upButton.id = "input";
+      
+       var doneButton = L.DomUtil.create('button', "btn  btn-primary",div);
+       doneButton.type = "button";
+       doneButton.innerHTML="Add Some GeoJSON";
+        L.DomEvent.addListener(doneButton,"click",function(){
+        	upButton.click();
+           });
+   upButton.onchange = function(){
+   	var file = document.getElementById("input").files[0];
+           var reader = new FileReader();
+           reader.onload=function(){
+           	if(reader.readyState !== 2 || reader.error){
+           		return;
+           	}else{
+           		L.geoJson(JSON.parse(reader.result),options).addTo(m);
+           }
+           };
+           reader.readAsText(file);
+            
+   	
+   }
+        return div;
+    }
+});
+//add them to the map
+m.addControl(new NewButton());
+</script>
+</body>
+</html>
