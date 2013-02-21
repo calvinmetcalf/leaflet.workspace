@@ -56,6 +56,7 @@ var NewButton= L.Control.extend({//creating the buttons
     onAdd: function (map) {
         // create the control container with a particular class name
         var div = L.DomUtil.create('form','bgroup');
+        div.id="dropzone";
         var upButton = L.DomUtil.create('input', 'upStuff',div);
         upButton.type="file";
        upButton.id = "input";
@@ -68,7 +69,11 @@ var NewButton= L.Control.extend({//creating the buttons
            });
    upButton.onchange = function(){
    	var file = document.getElementById("input").files[0];
-           var reader = new FileReader();
+           
+       handleFile(file);
+   }
+   function handleFile(file){
+   	var reader = new FileReader();
            reader.onload=function(){
            	if(reader.readyState !== 2 || reader.error){
            		return;
@@ -77,14 +82,44 @@ var NewButton= L.Control.extend({//creating the buttons
            }
            };
            reader.readAsText(file);
-            
-   	
    }
+
+ 
+var dropbox = document.getElementById("map");
+dropbox.addEventListener("dragenter", dragenter, false);
+dropbox.addEventListener("dragover", dragover, false);
+dropbox.addEventListener("drop", drop, false);
+function dragenter(e) {
+  e.stopPropagation();
+  e.preventDefault();
+}
+ 
+function dragover(e) {
+  e.stopPropagation();
+  e.preventDefault();
+} 
+
+function drop(e) {
+  e.stopPropagation();
+  e.preventDefault();
+ 
+  var dt = e.dataTransfer;
+  var files = dt.files;
+ 
+ var i = 0;
+ var len = files.length;
+ if(!len){return}
+ while(i<len){
+ 	handleFile(files[i]);
+ 	i++;
+ }
+}
         return div;
     }
 });
 //add them to the map
 m.addControl(new NewButton());
+
 </script>
 </body>
 </html>
