@@ -89,9 +89,11 @@ var dropbox = document.getElementById("map");
 dropbox.addEventListener("dragenter", dragenter, false);
 dropbox.addEventListener("dragover", dragover, false);
 dropbox.addEventListener("drop", drop, false);
+dropbox.addEventListener("dragleave",function(){m.scrollWheelZoom.enable();},false);
 function dragenter(e) {
   e.stopPropagation();
   e.preventDefault();
+ m.scrollWheelZoom.disable();
 }
  
 function dragover(e) {
@@ -102,7 +104,7 @@ function dragover(e) {
 function drop(e) {
   e.stopPropagation();
   e.preventDefault();
- 
+ m.scrollWheelZoom.enable();
   var dt = e.dataTransfer;
   var files = dt.files;
  
