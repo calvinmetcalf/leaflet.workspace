@@ -30,6 +30,35 @@
 <![endif]-->
 
 <script>
+L.Control.Layers.prototype._addItem= function (obj) {
+    	var label = document.createElement('label'),
+		    input,
+		    checked = this._map.hasLayer(obj.layer);
+
+		if (obj.overlay) {
+			input = document.createElement('input');
+			input.type = 'checkbox';
+			input.className = 'leaflet-control-layers-selector';
+			input.defaultChecked = checked;
+		} else {
+			input = this._createRadioElement('leaflet-base-layers', checked);
+		}
+
+		input.layerId = L.stamp(obj.layer);
+
+		L.DomEvent.on(input, 'click', this._onInputClick, this);
+
+		var name = document.createElement('span');
+		name.innerHTML = ' ' + obj.name;
+
+		label.appendChild(input);
+		label.appendChild(name);
+        label.className = obj.overlay ? "checkbox" : "radio";
+		var container = obj.overlay ? this._overlaysList : this._baseLayersList;
+		container.appendChild(label);
+
+		return label;
+	}
 var m = L.map("map",{zoomControl:false}).setView([42.3164, -71.6803],9);
 
 //make the map
@@ -45,12 +74,14 @@ var options = {
         return{color : colorbrewer.Spectral[11][parseInt((new jsSHA(JSON.stringify(feature), "TEXT")).getHash("SHA-512", "HEX").slice(0,16),16)%11]}
     }
 };
+
+var lc = L.control.layers.provided(["Esri.WorldShadedRelief","Stamen.Watercolor","Stamen.Toner"]).addTo(m);
 var stamenBase = L.layerGroup([
-	L.tileLayer("http://{s}.tile.stamen.com/terrain-background/{z}/{x}/{y}.jpg",{minZoom:4,maxZoom:18}),
+    L.tileLayer("http://{s}.tile.stamen.com/terrain-background/{z}/{x}/{y}.jpg",{minZoom:4,maxZoom:18}),
 	L.tileLayer("http://{s}.tile.stamen.com/terrain-lines/{z}/{x}/{y}.png",{minZoom:4,maxZoom:18,attribution:'Map tiles by <a href="http://stamen.com">Stamen Design</a>, <a href="http://creativecommons.org/licenses/by/3.0">CC BY 3.0</a> &mdash; Map data &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors, <a href="http://creativecommons.org/licenses/by-sa/2.0/">CC-BY-SA</a>'})
-	]).addTo(m);
-var lc = L.control.layers({"Stamen Basemap":stamenBase}).addTo(m);
-m.addHash();
+	]);
+lc.addBaseLayer(stamenBase,"Stamen Terain")
+m.addHash({lc:lc});
 var NewButton= L.Control.extend({//creating the buttons
     options: {
         position: 'topleft'
@@ -123,6 +154,8 @@ function drop(e) {
 });
 //add them to the map
 m.addControl(new NewButton());
+
+
 
 </script>
 </body>
