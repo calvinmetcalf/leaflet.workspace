@@ -24,6 +24,7 @@
 
 <script src="colorbrewer.js"></script>
 <script src="http://leaflet-extras.github.com/dist/leaflet-full.js"></script>
+<script src="sha512.js"></script>
 <!--[if IE]>
    <script src="ddr-ecma5-min.js"></script>
 <![endif]-->
@@ -39,7 +40,10 @@ var options = {
 				return k + ": " + feature.properties[k] ;
 			}).join("<br />"));
     	}
-	}
+	},
+    style:function(feature){
+        return{color : colorbrewer.Spectral[11][parseInt((new jsSHA(JSON.stringify(feature), "TEXT")).getHash("SHA-512", "HEX").slice(0,16),16)%11]}
+    }
 };
 var stamenBase = L.layerGroup([
 	L.tileLayer("http://{s}.tile.stamen.com/terrain-background/{z}/{x}/{y}.jpg",{minZoom:4,maxZoom:18}),
