@@ -110,7 +110,7 @@ var NewButton= L.Control.extend({//creating the buttons
       
        var doneButton = L.DomUtil.create('button', "btn  btn-primary",div);
        doneButton.type = "button";
-       doneButton.innerHTML="Add Some GeoJSON";
+       doneButton.innerHTML="Add Some GeoJSON<br/>or a Zipped Shapefile";
         L.DomEvent.addListener(doneButton,"click",function(){
         	upButton.click();
            });
