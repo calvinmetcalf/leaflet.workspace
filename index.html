@@ -13,6 +13,7 @@
       	display:none;
       }
     </style>
+    <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/leaflet/0.5.1/leaflet.css" />
     <link rel="stylesheet" href="css/bootstrap.css" />
 
 
@@ -22,14 +23,16 @@
 <title>Leaflet</title></head><body>
 <div id="map"></div>
 
-<script src="colorbrewer.js"></script>
-<script src="http://leaflet-extras.github.com/dist/leaflet-full.js"></script>
-<script src="sha512.js"></script>
-<!--[if IE]>
-   <script src="ddr-ecma5-min.js"></script>
-<![endif]-->
+<script src="js/colorbrewer.js"></script>
+<script src="//cdnjs.cloudflare.com/ajax/libs/leaflet/0.5.1/leaflet.js"></script>
+<script src="js/sha512.js"></script>
+<script src="js/communist.js"></script>
 
 <script>
+var worker = communist(function(data,cb){
+    importScripts('js/shp.js');
+	cb(shp.parseZip(data));
+});
 L.Control.Layers.prototype._addItem= function (obj) {
     	var label = document.createElement('label'),
 		    input,
@@ -59,15 +62,29 @@ L.Control.Layers.prototype._addItem= function (obj) {
 
 		return label;
 	}
-var m = L.map("map",{zoomControl:false}).setView([42.3164, -71.6803],9);
+var m = L.map("map",{zoomControl:false}).setView([32.69,10.55],3);
+var url = 'http://otile{s}.mqcdn.com/tiles/1.0.0/osm/{z}/{x}/{y}.jpeg';
 
+var attributionText = 'Tiles Courtesy of <a href="http://www.mapquest.com/">MapQuest</a> &mdash; Map data &copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+
+var mapquestSubdomains = '1234';
+
+var optionsObject = {
+    attribution : attributionText,
+    subdomains : mapquestSubdomains
+}
+
+var mq=L.tileLayer(url, optionsObject);
+var watercolor = L.tileLayer('http://{s}.tile.stamen.com/watercolor/{z}/{x}/{y}.jpg',{attribution:'Map tiles by <a href="http://stamen.com">Stamen Design</a>, <a href="http://creativecommons.org/licenses/by/3.0">CC BY 3.0</a> &mdash; Map data &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors, <a href="http://creativecommons.org/licenses/by-sa/2.0/">CC-BY-SA</a>'})
+watercolor.addTo(m);
+var lc = L.control.layers({"Stamen Watercolor":watercolor,"Map Quest Open":mq}).addTo(m);
 //make the map
 var options = {
 	onEachFeature:function(feature, layer) {
 		if (feature.properties) {
 			layer.bindPopup(Object.keys(feature.properties).map(function(k){
 				return k + ": " + feature.properties[k] ;
-			}).join("<br />"));
+			}).join("<br />"),{maxHeight:200});
     	}
 	},
     style:function(feature){
@@ -78,13 +95,7 @@ var options = {
     }
 };
 
-var lc = L.control.layers.provided(["Esri.WorldShadedRelief","Stamen.Watercolor","Stamen.Toner"]).addTo(m);
-var stamenBase = L.layerGroup([
-    L.tileLayer("http://{s}.tile.stamen.com/terrain-background/{z}/{x}/{y}.jpg",{minZoom:4,maxZoom:18}),
-	L.tileLayer("http://{s}.tile.stamen.com/terrain-lines/{z}/{x}/{y}.png",{minZoom:4,maxZoom:18,attribution:'Map tiles by <a href="http://stamen.com">Stamen Design</a>, <a href="http://creativecommons.org/licenses/by/3.0">CC BY 3.0</a> &mdash; Map data &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors, <a href="http://creativecommons.org/licenses/by-sa/2.0/">CC-BY-SA</a>'})
-	]);
-lc.addBaseLayer(stamenBase,"Stamen Terain")
-m.addHash({lc:lc});
+
 var NewButton= L.Control.extend({//creating the buttons
     options: {
         position: 'topleft'
@@ -109,6 +120,9 @@ var NewButton= L.Control.extend({//creating the buttons
        handleFile(file);
    }
    function handleFile(file){
+       if(file.name.slice(-3)==='zip'){
+           return handleZipFile(file);
+       }
    	    var reader = new FileReader();
         reader.onload=function(){
            	if(reader.readyState !== 2 || reader.error){
@@ -119,7 +133,26 @@ var NewButton= L.Control.extend({//creating the buttons
            };
            reader.readAsText(file);
    }
-
+function handleZipFile(file){
+    	var addIt = function(geoJson){
+			lc.addOverlay(L.geoJson(geoJson,options).addTo(m),geoJson.fileName);
+		}
+   	    var reader = new FileReader();
+        reader.onload=function(){
+           	if(reader.readyState !== 2 || reader.error){
+           		return;
+           	}else{
+           		worker.data(reader.result,[reader.result]).then(function(geoJson){
+           			if(Array.isArray(geoJson)){
+           				geoJson.forEach(addIt)
+           			}else{
+	           			addIt(geoJson);
+           			}
+           		},function(a){console.log(a)});
+           }
+       };
+           reader.readAsArrayBuffer(file);
+   }
  
 var dropbox = document.getElementById("map");
 dropbox.addEventListener("dragenter", dragenter, false);
