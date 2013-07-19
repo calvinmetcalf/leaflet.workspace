@@ -1,4 +1,4 @@
-/*! communist 2013-06-18*/
+/*! communist 1.7.4 2013-07-18*/
 /*!©2013 Calvin Metcalf @license MIT https://github.com/calvinmetcalf/communist */
 if (typeof document === "undefined") {
     self._noTransferable=true;
@@ -7,7 +7,7 @@ if (typeof document === "undefined") {
 		eval(e.data);
 	};
 } else {
-(function(){
+(function(global){
 	"use strict";
 /*!From setImmediate Copyright (c) 2012 Barnesandnoble.com,llc, Donavon West, and Domenic Denicola @license MIT https://github.com/NobleJS/setImmediate */
 (function(attachTo,global) {
@@ -104,7 +104,7 @@ if (typeof document === "undefined") {
 
 			return handle;
 		};
-	})(c,window);
+	})(c,global);
 /*! Promiscuous ©2013 Ruben Verborgh @license MIT https://github.com/RubenVerborgh/promiscuous*/
 (function (exports) {
 	var func = "function";
@@ -208,53 +208,64 @@ if (typeof document === "undefined") {
 	};
 	// Returns a deferred
 	exports.deferred= createDeferred;
-})(c);
-
-c.all=function(array){
-	var promise = c.deferred();
-	var len = array.length;
-	var resolved=0;
-	var out = new Array(len);
-	var onSuccess=function(n){
-		return function(v){
-			out[n]=v;
-			resolved++;
-			if(resolved===len){
-				promise.resolve(out);
-			}
+	exports.all=function(array){
+		var promise = exports.deferred();
+		var len = array.length;
+		var resolved=0;
+		var out = [];
+		var onSuccess=function(n){
+			return function(v){
+				out[n]=v;
+				resolved++;
+				if(resolved===len){
+					promise.resolve(out);
+				}
+			};
 		};
-	};
 		array.forEach(function(v,i){
 			v.then(onSuccess(i),function(a){
 				promise.reject(a);
 			});
 		});
-	return promise.promise;
-};
+		return promise.promise;
+	};
+})(c);
 
 //this is mainly so the name shows up when you look at the object in the console
 var Communist = function(){};
 //regex out the importScript call and move it up to the top out of the function.
-function moveImports(string){
-	var script;
-	var match = string.match(/(importScripts\(.*\);)/);
-	if(match){
-		script = match[0].replace(/importScripts\((.*\.js[\'\"])\);?/,
-		function(a,b){
-			if(b){
-				return "importScripts("+b.split(",").map(function(cc){
-					return cc.slice(0,1)+c.makeUrl(cc.slice(1,-1))+cc.slice(-1);
-				})+");\n";
-			} else {
-				return "";
-			}
-		})+string.replace(/(importScripts\(.*\.js[\'\"]\);?)/,"\n");
-	}else{
-		script = string;
+function regexImports(string){
+	var rest=string,
+	match = true,
+	matches = {},
+	loopFunc = function(a,b){
+		if(b){
+			"importScripts("+b.split(",").forEach(function(cc){
+				matches[c.makeUrl(cc.match(/\s*[\'\"](\S*)[\'\"]\s*/)[1])]=true; // trim whitespace, add to matches
+			})+");\n";
+		}
+	};
+	while(match){
+		match = rest.match(/(importScripts\(.*?\);?)/);
+		rest = rest.replace(/(importScripts\(\s*(?:[\'\"].*?[\'\"])?\s*\);?)/,"\n");
+		if(match){
+			match[0].replace(/importScripts\(\s*([\'\"].*?[\'\"])?\s*\);?/g,loopFunc);
+		}
 	}
-	return script;
+	matches = Object.keys(matches);
+	return [matches,rest];
 }
 
+function moveImports(string){
+	var str = regexImports(string);
+	var matches = str[0];
+	var rest = str[1];
+	if(matches.length>0){
+		return 'importScripts("'+matches.join('","')+'");\n'+rest;
+	}else{
+		return rest;
+	}
+}
 function getPath(){
 	if(typeof SHIM_WORKER_PATH !== "undefined"){
 		return SHIM_WORKER_PATH;
@@ -288,73 +299,91 @@ function makeWorker(strings){
 //we can bake the data into the worker when we make it.
 
 function single(fun,data){
-	if(typeof Worker === 'undefined'){
-		return multiUse(fun).data(data);
+	if(typeof Worker === 'undefined'||typeof fakeLegacy !== 'undefined'){
+		return object(fun).data(data);
 	}
 	var promise = c.deferred();
-	var worker = makeWorker(['var _self={};\n_self.fun = ',fun,';\n\
-	_self.cb=function(data,transfer){\n\
-			!self._noTransferable?self.postMessage(data,transfer):self.postMessage(data);\n\
-			self.close();\n\
-		};\n\
-		_self.result = _self.fun(',JSON.stringify(data),',_self.cb);\n\
-		if(typeof _self.result !== "undefined"){\n\
-			_self.cb(_self.result);\n\
-		}']);
-	worker.onmessage=function(e){
-		promise.resolve(e.data);
+	var obj = {
+		fun:fun,
+		data:JSON.stringify(data),
+		init:function(){
+			var that = this;
+			var data = JSON.parse(this.data);
+			var cb = function(data,trans){
+				that.fire('done',data,trans);
+			};
+			var resp = that.fun(data,cb);
+			if(typeof resp !== 'undefined'){
+				cb(resp);
+			}
+		}
 	};
-	worker.onerror=function(e){
+	var worker = object(obj);
+	worker.on('done',function(e){
+		promise.resolve(e);
+		worker.close();
+	});
+	worker.on('error',function(e){
 		e.preventDefault();
 		promise.reject(e.message);
-	};
+		worker.close();
+	});
 	return promise.promise;
 }
 
 function mapWorker(fun,callback,onerr){
-	if(typeof Worker === 'undefined'){
-		return fakeMapWorker(fun,callback,onerr);
-	}
+	onerr = onerr || function(){callback();};
 	var w = new Communist();
-	var worker = makeWorker(['\n\
-	var _db={};\n\
-	_db.__close__=function(){\n\
-		self.close();\n\
-	};\n\
-	var _self={};\n\
-	_db.__fun__ = ',fun,';\n\
-	_self.cb=function(data,transfer){\n\
-		!self._noTransferable?self.postMessage(data,transfer):self.postMessage(data);\n\
-	};\n\
-	self.onmessage=function(e){\n\
-		_self.result = _db.__fun__(e.data,_self.cb);\n\
-			if(typeof _self.result !== "undefined"){\n\
-				_self.cb(_self.result);\n\
-		}\n\
-	}']);
-	worker.onmessage = function(e){
-		callback(e.data);
+	var obj = {__func__:fun};
+	obj.data = function(data){
+		var that = this;
+		var cb = function(data,transform){
+			that.fire('data',data,transform);
+		};
+		var resp = that.__func__(data,cb);
+		if(typeof resp !== "undefined"){
+			cb(resp);
+		}
 	};
-	if(onerr){
-		worker.onerror=onerr;
-	}else{
-		worker.onerror=function(){callback();};
-	}
+	obj.init = function(){
+		this.on('data',function(data){
+			this.data(data);
+		});
+	};
+	var worker = object(obj);
 	w.data=function(data,transfer){
-		!c._noTransferable?worker.postMessage(data,transfer):worker.postMessage(data);
+		worker.fire('data',data,transfer);
 		return w;
 	};
+	worker.on('data',callback);
+	worker.on('error',onerr);
 	w.close=function(){
-		return worker.terminate();
+		return worker.close();
 	};
 	return w;
 }
-function multiUse(fun){
-	return object({data:fun});
-}
-function fakeObject(obj){
+function fakeObject(inObj){
+	/*jslint evil: true */
 	var w = new Communist();
 	var promises = [];
+	var loaded = false;
+	var wlisteners = {};
+	var olisteners={};
+	var loading;
+	var called=false;
+	function ajax(url){
+		var promise = c.deferred();
+		var xhr = new XMLHttpRequest();
+		xhr.open('GET',url);
+		xhr.onload = function() {
+			promise.resolve(xhr.responseText);
+		};
+		xhr.onerror=function(){
+			promise.reject('failed to download');
+		};
+		xhr.send();
+		return promise.promise;
+	}
 	var rejectPromises = function(msg){
 		if(typeof msg!=="string" && msg.preventDefault){
 			msg.preventDefault();
@@ -366,82 +395,268 @@ function fakeObject(obj){
 			}
 		});
 	};
-	if(!("initialize" in obj)){
-		obj.initialize=function(){};
+	var obj;
+	if(!("initialize" in inObj)){
+		if('init' in inObj){
+			inObj.initialize=inObj.init;
+		}else{
+			inObj.initialize=function(){};
+		}
 	}
 	var keyFunc=function(key){
-		var result;
-		var out = function(data){
-			var i = promises.length;
+		var actualFunc = function(data){
+			var result,i,callback;
+			i = promises.length;
+			if(!called){
+				called = true;
+			}
 			promises[i] = c.deferred();
-			var callback = function(data){
+			callback = function(data){
 				promises[i].resolve(data);
 			};
 			try{
-				result = obj[key](data,callback);
+				result = obj[key].call(obj,data,callback);
 				if(typeof result !== "undefined"){
 					callback(result);
 				}
 			} catch (e){
-				promises[i].reject(e);
+				obj.fire('error',{preventDefault:function(){},messege:e});
+				promises[i].reject({preventDefault:function(){},messege:e});
 			}
 			return promises[i].promise;
 		};
-		return out;
+		return function(data){
+			if(loaded){
+				return actualFunc(data);
+			}else{
+				return loading.then(function(){
+					return actualFunc(data);
+				});
+			}
 		};
-	for(var key in obj){
+	};
+	var i = 0;
+	var fObj="{";
+	for(var key in inObj){
+		if(i!==0){
+			fObj=fObj+",";
+		}else{
+			i++;
+		}
+		fObj=fObj+key+":"+inObj[key].toString();
 		w[key]=keyFunc(key);
 	}
+	fObj=fObj+"}";
+	var re = /(\S+?:function\s*?)(\S+?)(\s*?\()/g;
+	var regexed = regexImports(fObj);
+	var forImport = regexed[0];
+	if(forImport.length === 0){
+		loaded = true;
+		(function(){
+			eval('obj = '+regexed[1].replace(re,'$1$3'));
+		})();
+		addEvents(w,obj);
+	}else{
+		loading = c.all(forImport.map(function(v){
+			return ajax(v);
+		})).then(function(array){
+			eval(array.join("\n")+";\nobj = "+regexed[1].replace(re,'$1$3'));
+			addEvents(w,obj);
+			return true;
+		});
+	}
+	function addEvents(w,obj){
+	w.on=function(eventName,func,scope){
+		scope = scope || w;
+		if(eventName.indexOf(' ')>0){
+			eventName.split(' ').map(function(v){
+				return w.on(v,func,scope);
+			},this);
+			return w;
+		}
+		if(!(eventName in wlisteners)){
+			wlisteners[eventName]=[];
+		}
+		wlisteners[eventName].push(function(a){
+			func.call(scope,a);
+		});
+	};
+	w.fire=function(eventName,data){
+		c.setImmediate(function () {
+			if(eventName in olisteners && Array.isArray(olisteners[eventName])){
+				olisteners[eventName].forEach(function(v){
+					v(data);
+				});
+			}
+		});
+		return w;
+	};
+	w.off = function (eventName, func) {
+		if(eventName.indexOf(' ')>0){
+			eventName.split(' ').map(function(v){
+				return w.off(v,func);
+			});
+			return w;
+		}
+		if (!(eventName in wlisteners)) {
+			return w;
+		}
+		else if (!func) {
+			delete wlisteners[eventName];
+		}
+		else {
+			if (wlisteners[eventName].indexOf(func) > -1) {
+				if (wlisteners[eventName].length > 1) {
+					delete wlisteners[eventName];
+				}
+				else {
+					wlisteners[eventName].splice(wlisteners[eventName].indexOf(func), 1);
+				}
+			}
+		}
+		return w;
+	};
+	obj.on=function(eventName,func,scope){
+		scope = scope || obj;
+		if(eventName.indexOf(' ')>0){
+			eventName.split(' ').map(function(v){
+				return obj.on(v,func,scope);
+			},this);
+			return obj;
+		}
+		if(!(eventName in olisteners)){
+			olisteners[eventName]=[];
+		}
+		olisteners[eventName].push(function(a){
+			try{
+				func.call(scope,a);
+			}catch(e){
+				obj.fire('error',{preventDefault:function(){},messege:e});
+			}
+		});
+		return obj;
+	};
+	obj.fire=function(eventName,data){
+		if(!(eventName in wlisteners)){
+			return obj;
+		}
+		wlisteners[eventName].forEach(function(v){
+			v(data);
+		});
+		return obj;
+	};
+	obj.off = function (eventName, func) {
+		if(eventName.indexOf(' ')>0){
+			eventName.split(' ').map(function(v){
+				return obj.off(v,func);
+			});
+			return obj;
+		}
+		if (!(eventName in olisteners)) {
+			return obj;
+		}
+		else if (!func) {
+			delete olisteners[eventName];
+		}
+		else {
+			if (olisteners[eventName].indexOf(func) > -1) {
+				if (olisteners[eventName].length > 1) {
+					delete olisteners[eventName];
+				}
+				else {
+					olisteners[eventName].splice(olisteners[eventName].indexOf(func), 1);
+				}
+			}
+		}
+		return obj;
+	};
+	}
 	w._close = function(){
+		olisteners={};
+		wlisteners={};
+		promises.forEach(function(a){
+			a.reject("closed");
+		});
 		return c.resolve();
 	};
 	if(!('close' in w)){
 		w.close=w._close;
 	}
-w.initialize();
-	return w;
-}
-
-function fakeMapWorker(fun,callback,onerr){
-	var w = new Communist();
-	var worker = fakeObject({data:fun});
-	w.data=function(data){
-		worker.data(data).then(callback,onerr);
-		return w;
-	};
-	w.close=worker.close;
-	return w;
-}
-
-function fakeReducer(fun,callback){
-	var w = new Communist();
-	var accum;
-	w.data=function(data){
-		accum=accum?fun(accum,data):data;
-		return w;
-	};
-	w.fetch=function(){
-		callback(accum);
-		return w;
-	};
-	w.close=function(silent){
-		if(!silent){
-			callback(accum);
-		}
-		return;
-	};
+	if(!called){
+		w.initialize('init');
+	}
 	return w;
 }
 
 function object(obj){
-	if(typeof Worker === 'undefined'){
+	if(typeof obj === 'function'){
+		obj = {
+			data:obj
+		};
+	}
+	if(typeof Worker === 'undefined'||typeof fakeLegacy !== 'undefined'){
 		return fakeObject(obj);
 	}
+	var listeners = {};
 	var w = new Communist();
+	w.on=function(eventName,func,scope){
+		scope = scope || w;
+		if(eventName.indexOf(' ')>0){
+			eventName.split(' ').map(function(v){
+				return w.on(v,func,scope);
+			},this);
+			return w;
+		}
+		if(!(eventName in listeners)){
+			listeners[eventName]=[];
+		}
+		listeners[eventName].push(function(a){
+			func.call(scope,a);
+		});
+		return w;
+	};
+	var _fire=function(eventName,data){
+		if(!(eventName in listeners)){
+			return w;
+		}
+		listeners[eventName].forEach(function(v){
+			v(data);
+		});
+		return w;
+	};
+	w.fire = function(eventName,data,transfer){
+		!c._noTransferable?worker.postMessage([[eventName],data],transfer):worker.postMessage([[eventName],data]);
+		return w;
+	};
+	w.off = function (eventName, func) {
+		if(eventName.indexOf(' ')>0){
+			eventName.split(' ').map(function(v){
+				return w.off(v,func);
+			});
+			return w;
+		}
+		if (!(eventName in listeners)) {
+			return w;
+		}
+		else if (!func) {
+			delete listeners[eventName];
+		}
+		else {
+			if (listeners[eventName].indexOf(func) > -1) {
+				if (listeners[eventName].length > 1) {
+					delete listeners[eventName];
+				}
+				else {
+					listeners[eventName].splice(listeners[eventName].indexOf(func), 1);
+				}
+			}
+		}
+		return w;
+	};
 	var i = 0;
 	var promises = [];
 	var rejectPromises = function(msg){
-		if(typeof msg!=="string" && msg.preventDefault){
+		if(typeof msg!=="string" && 'preventDefault' in msg){
 			msg.preventDefault();
 			msg=msg.message;
 		}
@@ -451,15 +666,20 @@ function object(obj){
 			}
 		});
 	};
+	
 	if(!("initialize" in obj)){
-		obj.initialize=function(){};
+		if('init' in obj){
+			obj.initialize=obj.init;
+		}else{
+			obj.initialize=function(){};
+		}
 	}
 	var fObj="{";
 	var keyFunc=function(key){
 		var out = function(data, transfer){
 			var i = promises.length;
 			promises[i] = c.deferred();
-			!c._noTransferable?worker.postMessage([i,key,data],transfer):worker.postMessage([i,key,data]);
+			!c._noTransferable?worker.postMessage([['com.communistjs',i],key,data],transfer):worker.postMessage([['com.communistjs',i],key,data]);
 			return promises[i].promise;
 		};
 		return out;
@@ -474,28 +694,27 @@ function object(obj){
 		w[key]=keyFunc(key);
 	}
 	fObj=fObj+"}";
-	
-	var worker = makeWorker(['\n\
-	var _db='+fObj+';\n\
-	self.onmessage=function(e){\n\
-	var cb=function(data,transfer){\n\
-		!self._noTransferable?self.postMessage([e.data[0],data],transfer):self.postMessage([e.data[0],data]);\n\
-	};\n\
-		var result = _db[e.data[1]](e.data[2],cb);\n\
-			if(typeof result !== "undefined"){\n\
-				cb(result);\n\
-			}\n\
-	}\n\
-	_db.initialize()']);
+	var worker = makeWorker(['var _db = ',fObj,';var listeners = {};_db.on = function (eventName, func, scope) {	if(eventName.indexOf(" ")>0){		return eventName.split(" ").map(function(v){			return _db.on(v,func,scope);		},_db);	}	scope = scope || _db;	if (!(eventName in listeners)) {		listeners[eventName] = [];	}	listeners[eventName].push(function (a) {		func.call(scope, a);	});};var _fire = function (eventName, data) {	if (!(eventName in listeners)) {		return;	}	listeners[eventName].forEach(function (v) {		v(data);	});};_db.fire = function (eventName, data, transfer) {	!self._noTransferable ? self.postMessage([		[eventName], data], transfer) : self.postMessage([		[eventName], data]);};_db.off=function(eventName,func){	if(eventName.indexOf(" ")>0){		return eventName.split(" ").map(function(v){			return _db.off(v,func);		});	}	if(!(eventName in listeners)){		return;	}else if(!func){		delete listeners[eventName];	}else{		if(listeners[eventName].indexOf(func)>-1){			if(listeners[eventName].length>1){				delete listeners[eventName];			}else{				listeners[eventName].splice(listeners[eventName].indexOf(func),1);			}		}	}};var console={};function makeConsole(method){	return function(){		var len = arguments.length;		var out =[];		var i = 0;		while (i<len){			out.push(arguments[i]);			i++;		}		_db.fire("console",[method,out]);	};}["log", "debug", "error", "info", "warn", "time", "timeEnd"].forEach(function(v){	console[v]=makeConsole(v);});self.onmessage=function(e){	_fire("messege",e.data[1]);	if(e.data[0][0]==="com.communistjs"){		return regMsg(e);	}else{		_fire(e.data[0][0],e.data[1]);	}};var regMsg = function(e){	var cb=function(data,transfer){		!self._noTransferable?self.postMessage([e.data[0],data],transfer):self.postMessage([e.data[0],data]);	};	var result = _db[e.data[1]](e.data[2],cb);	if(typeof result !== "undefined"){		cb(result);	}};_db.initialize();']);
 	worker.onmessage= function(e){
-			promises[e.data[0]].resolve(e.data[1]);
-			promises[e.data[0]]=0;
+		_fire('message',e.data[1]);
+		if(e.data[0][0]==='com.communistjs'){
+			promises[e.data[0][1]].resolve(e.data[1]);
+			promises[e.data[0][1]]=0;
+		}else{
+			_fire(e.data[0][0],e.data[1]);
+		}
 	};
-	worker.onerror=rejectPromises;
+	worker.onerror=function(e){
+		rejectPromises(e);
+		_fire('error',e);
+	};
+	w.on('console',function(msg){
+		console[msg[0]].apply(console,msg[1]);
+	});
 	w._close = function(){
 		worker.terminate();
 		rejectPromises("closed");
-		return c.resolve();
+		return c.resolve(false);
 	};
 	if(!('close' in w)){
 		w.close=w._close;
@@ -509,12 +728,20 @@ function queue(obj,n,dumb){
 	w.__batchcb__=new Communist();
 	w.__batchtcb__=new Communist();
 	w.batch = function(cb){
-		w.__batchcb__.__cb__=cb;
-		return w.__batchcb__;
+		if(typeof cb === 'function'){
+			w.__batchcb__.__cb__=cb;
+			return w.__batchcb__;
+		}else{
+			return clearQueue(cb);
+		}
 	};
 	w.batchTransfer = function(cb){
-		w.__batchtcb__.__cb__=cb;
-		return w.__batchtcb__;
+		if(typeof cb === 'function'){
+			w.__batchtcb__.__cb__=cb;
+			return w.__batchtcb__;
+		}else{
+			return clearQueue(cb);
+		}
 	};
 	var workers = new Array(n);
 	var numIdle=0;
@@ -525,6 +752,40 @@ function queue(obj,n,dumb){
 		workers[numIdle]=object(obj);
 		idle.push(numIdle);
 		numIdle++;
+	}
+	w.on=function(eventName,func,context){
+		workers.forEach(function(worker){
+			worker.on(eventName,func,context);
+		});
+		return w;
+	};
+	w.off=function(eventName,func,context){
+		workers.forEach(function(worker){
+			worker.off(eventName,func,context);
+		});
+		return w;
+	};
+	var batchFire = function(eventName,data){
+		workers.forEach(function(worker){
+			worker.fire(eventName,data);
+		});
+		return w;
+	};
+	w.fire = function(eventName,data){
+		workers[~~(Math.random()*n)].fire(eventName,data);
+		return w;
+	};
+	w.batch.fire = batchFire;
+	w.batchTransfer.fire = batchFire;
+	function clearQueue(mgs){
+		mgs = mgs || 'canceled';
+		queueLen = 0;
+		var oQ = que;
+		que = [];
+		oQ.forEach(function(p){
+			p[3].reject(mgs);
+		});
+		return w;
 	}
 	function keyFunc(k){
 		return function(data,transfer){
@@ -561,7 +822,6 @@ function queue(obj,n,dumb){
 			}));
 		};
 	}
-	obj._close=function(){};
 	for(var key in obj){
 		w[key]=keyFunc(key);
 		w.batch[key]=keyFuncBatch(key);
@@ -606,56 +866,42 @@ function queue(obj,n,dumb){
 		}
 		return promise.promise;
 	}
+	w._close = function(){
+		return c.all(workers.map(function(ww){
+			return ww._close();
+		}));
+	};
 	if(!('close' in w)){
 		w.close=w._close;
 	}
 	return w;
 }
 
-function rWorker(fun,callback){
-	if(typeof Worker === 'undefined'){
-		return fakeReducer(fun,callback);
-	}
-	var w = new Communist();
-	var func = 'function(dat,cb){ var fun = '+fun+';\n\
-		switch(dat[0]){\n\
-			case "data":\n\
-				if(!this._r){\n\
-					this._r = dat[1];\n\
-				}else{\n\
-					this._r = fun(this._r,dat[1]);\n\
-				}\n\
-				break;\n\
-			case "get":\n\
-				return cb(this._r);\n\
-			case "close":\n\
-				cb(this._r);\n\
-				this.__close__();\n\
-				break;\n\
-		}\n\
-	};';
-	var cb =function(data){
-		callback(data);
-	};
-	var worker = mapWorker(func,cb);
-	w.data=function(data,transfer){
-		!c._noTransferable?worker.data(["data",data],transfer):worker.data(["data",data]);
-		return w;
-	};
-	w.fetch=function(){
-		worker.data(["get"]);
-		return w;
-	};
-	w.close=function(silent){
-		if(silent){
-			callback=function(){};
+function rWorker(fun, callback) {
+	var obj = {
+		fun: fun,
+		data: function (dat) {
+			if (!this._r) {
+				this._r = dat;
+			}
+			else {
+				this._r = this.fun(this._r, dat);
+			}
+		},
+		fetch: function () {
+			this.fire('msg',this._r);
+		},
+		close: function (silent) {
+			if (!silent) {
+				this.fire('msg',this._r);
+			}
+			self.terminate;
 		}
-		worker.data(["close"]);
-		return;
 	};
-	return w;
+	var worker = object(obj);
+	worker.on('msg', callback);
+	return worker;
 }
-
 function incrementalMapReduce(threads){
 	var w = new Communist();
 	var len = 0;
@@ -685,7 +931,7 @@ function incrementalMapReduce(threads){
 		var i = 0;
 		function makeMapWorker(){
 				var dd;
-				var mw = mapWorker(fun, function(d){
+				function thenFunc(d){
 					if(typeof d !== undefined){
 						reducer.data(d);
 					}
@@ -693,9 +939,9 @@ function incrementalMapReduce(threads){
 						len--;
 						dd = data.pop();
 						if(t){
-							mw.data(dd,[dd]);
+							mw2.data(dd,[dd]);
 						}else{
-						mw.data(dd);
+							mw2.data(dd);
 						}
 					}else{
 						idle++;
@@ -709,8 +955,17 @@ function incrementalMapReduce(threads){
 							}
 						}
 					}
-				});
-			workers.push(mw);
+				}
+				var mw1 = object(fun);
+				var mw2 = {
+					data:function(data){
+						mw1.data(data).then(thenFunc);
+					},
+					close:function(){
+						mw1.close();
+					}
+				};
+			workers.push(mw2);
 			}
 		while(i<threads){
 			makeMapWorker();
@@ -813,47 +1068,77 @@ function nonIncrementalMapReduce(threads){
 }
 function c(a,b,d){
 	if(typeof a !== "number" && typeof b === "function"){
-		return mapWorker(a,b,d);
+		return c.mapper(a,b,d);
 	}else if(typeof a === "object" && !Array.isArray(a)){
 		if(typeof b === "number"){
-			return queue(a,b,d);
+			return c.queue(a,b,d);
 		}else{
-			return object(a);
+			return c.communist(a);
 		}
 	}else if(typeof a !== "number"){
-		return b ? single(a,b):multiUse(a);
+		return b ? c.singleUse(a,b):c.communist(a);
 	}else if(typeof a === "number"){
-		return !b ? incrementalMapReduce(a):nonIncrementalMapReduce(a);
+		return c.mapReduce(a,b);
 	}
 }
 c.reducer = rWorker;
+c.mapper = mapWorker;
 c.worker = makeWorker;
+c.makeWorker = makeWorker;
 c.makeUrl = function (fileName) {
 	var link = document.createElement("link");
 	link.href = fileName;
 	return link.href;
 };
-c.ajax = function(url,after,notjson){
-	var txt=!notjson?'JSON.parse(request.responseText)':"request.responseText";
-	var resp = after?"("+after.toString()+")("+txt+",_cb)":txt;
-	var func = 'function (url, _cb) {\n\
-		var request = new XMLHttpRequest();\n\
-		request.open("GET", url);\n\
-			request.onreadystatechange = function() {\n\
-				var _resp;\n\
-				if (request.readyState === 4 && request.status === 200) {\n'+
-					'_resp = '+resp+';\n\
-					if(typeof _resp!=="undefined"){_cb(_resp);}\n\
-					}\n\
-			};\n\
-			request.onerror=function(e){throw(e);}\n\
-		request.send();\n\
-	}';
-	return c(func,c.makeUrl(url));
+c.singleUse = single;
+c.communist = object;
+c.mapReduce=function(num,nonIncremental){
+	if(nonIncremental){
+		return nonIncrementalMapReduce(num);
+	}else{
+		return incrementalMapReduce(num);
+	}
 };
-if(typeof module === "undefined"){
-	window.communist=c;
+c.queue = queue;
+c.ajax = function(url,after,notjson){
+	var obj={ajax:function (url, _cb) {
+		var that = this;
+		var request = new XMLHttpRequest();
+		request.open("GET", url);
+			request.onreadystatechange = function() {
+				var _resp;
+				if (request.readyState === 4 && request.status === 200) {
+					_resp = that.after(!that.notjson?JSON.parse(request.responseText):request.responseText);
+					if(typeof _resp!=="undefined"){
+						_cb(_resp);
+						}
+					}
+			};
+			request.onerror=function(e){
+				throw(e);
+			};
+		request.send();
+	}};
+	obj.after = after||function(a){return a;};
+	obj.notjson = notjson||false;
+	return c(obj).ajax(c.makeUrl(url));
+};
+function initBrowser(c){
+	var origCW = global.cw;
+	c.noConflict=function(newName){
+		global.cw = origCW;
+		if(newName){
+			global[newName]=c;
+		}
+	};
+	global.communist = c;
+	global.cw = c;
+	
+}
+if(typeof module === "undefined" || !('exports' in module)){
+	initBrowser(c);
 } else {
 	module.exports=c;
 }
-})();}
+c.version = "1.7.4";
+})(this);}

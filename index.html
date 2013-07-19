@@ -10,10 +10,10 @@
       #map{ height: 100% }
       
       .upStuff{
-      	display:none;
+          display:none;
       }
     </style>
-    <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/leaflet/0.5.1/leaflet.css" />
+    <link rel="stylesheet" href="js/leaflet.css" />
     <link rel="stylesheet" href="css/bootstrap.css" />
 
 
@@ -24,15 +24,39 @@
 <div id="map"></div>
 
 <script src="js/colorbrewer.js"></script>
-<script src="//cdnjs.cloudflare.com/ajax/libs/leaflet/0.5.1/leaflet.js"></script>
+<script src="js/leaflet.js"></script>
+<script src="js/topojson.v1.min.js"></script>
 <script src="js/sha512.js"></script>
 <script src="js/communist.js"></script>
 
 <script>
-var worker = communist(function(data,cb){
+var worker = cw({data:function(data,cb){
     importScripts('js/shp.js');
 	cb(shp.parseZip(data));
-});
+},json:function(data){
+    importScripts("js/topojson.v1.min.js");
+    var name = data[1];
+    console.log(name);
+    function makeString(buffer){
+        var array = new Uint8Array(buffer);
+        var len = array.length;
+        var outString = "";
+        var i = 0;
+        while(i<len){
+            outString+=String.fromCharCode(array[i++]);
+        }
+        return outString;
+    }
+    var json = JSON.parse(makeString(data[0]));
+    var nom;
+    if(json.type === 'Topology'){
+        for(nom in json.objects){
+            this.fire('json',[topojson.feature(json,json.objects[nom]),nom]);
+        }
+    }else{
+        this.fire('json',[json,name]);
+    }
+}});
 L.Control.Layers.prototype._addItem= function (obj) {
     	var label = document.createElement('label'),
 		    input,
@@ -125,13 +149,20 @@ var NewButton= L.Control.extend({//creating the buttons
        }
    	    var reader = new FileReader();
         reader.onload=function(){
+            var ext;
            	if(reader.readyState !== 2 || reader.error){
            		return;
            	}else{
-           		lc.addOverlay(L.geoJson(JSON.parse(reader.result),options).addTo(m),file.name.slice(0,-8));
+                ext = file.name.split('.');
+                ext = ext[ext.length-1];
+                
+                worker.on('json',function(e){
+                    lc.addOverlay(L.geoJson(e[0],options).addTo(m),e[1]);
+                });
+                worker.json([reader.result,file.name.slice(0,(0-(ext.length+1)))],[reader.result]);
            }
            };
-           reader.readAsText(file);
+           reader.readAsArrayBuffer(file);
    }
 function handleZipFile(file){
     	var addIt = function(geoJson){
