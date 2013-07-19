@@ -132,9 +132,9 @@ var NewButton= L.Control.extend({//creating the buttons
         upButton.type="file";
        upButton.id = "input";
       
-       var doneButton = L.DomUtil.create('button', "btn  btn-primary",div);
+       var doneButton = L.DomUtil.create('button', "btn  btn-primary span3",div);
        doneButton.type = "button";
-       doneButton.innerHTML="Add Some GeoJSON<br/>or a Zipped Shapefile";
+       doneButton.innerHTML="Upload File<br />(or Drag and Drop Anywhere)<br />GeoJSON, TopoJSON, or Zipped Shapefile Work";
         L.DomEvent.addListener(doneButton,"click",function(){
         	upButton.click();
            });
