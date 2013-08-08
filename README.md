@@ -16,7 +16,7 @@ There is a large amount of geojson in these repos
 Also Uses
 
 - [leaflet for mapping](http://leafletjs.com/)
-- [communist for workers](http://communistjs.com)
+- [catiline for workers](http://catilinejs.com)
 - [shapefile-js](https://github.com/calvinmetcalf/shapefile-js)
 - [jsSHA for hashes](http://caligatio.github.com/jsSHA/)
 - [bootstrap for styles](https://github.com/twitter/bootstrap) 
