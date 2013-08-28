@@ -25,6 +25,7 @@
 
 <script src="js/colorbrewer.js"></script>
 <script src="js/leaflet.js"></script>
+<script src="js/leaflet.hash.js"></script>
 <script src="js/topojson.v1.min.js"></script>
 <script src="js/sha512.js"></script>
 <script src="js/communist.js"></script>
@@ -86,7 +87,11 @@ L.Control.Layers.prototype._addItem= function (obj) {
 
 		return label;
 	}
-var m = L.map("map",{zoomControl:false}).setView([32.69,10.55],3);
+var m = L.map("map",{zoomControl:false});
+if(!location.hash){
+    m.setView([32.69,10.55],3);
+}
+m.addHash();
 var url = 'http://otile{s}.mqcdn.com/tiles/1.0.0/osm/{z}/{x}/{y}.jpeg';
 
 var attributionText = 'Tiles Courtesy of <a href="http://www.mapquest.com/">MapQuest</a> &mdash; Map data &copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
