@@ -1,0 +1,30 @@
+{
+  "name": "leaflet.workspace",
+  "version": "0.0.0",
+  "description": "a drag and drop workspace for viewing geojson, topojson, and zipped shapefiles in leaflet",
+  "main": "index.html",
+  "scripts": {
+    "test": "test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/calvinmetcalf/leaflet.workspace.git"
+  },
+  "keywords": [
+    "workspace",
+    "leaflet",
+    "map"
+  ],
+  "author": "Calvin Metcalf",
+  "license": "BSD-2-Clause",
+  "bugs": {
+    "url": "https://github.com/calvinmetcalf/leaflet.workspace/issues"
+  },
+  "private":true,
+  "jam":{
+      "dependencies":{
+          "catiline":">2.8.0",
+          "shp":">1.3.2"
+      }
+  }
+}

@@ -28,36 +28,44 @@
 <script src="js/leaflet.hash.js"></script>
 <script src="js/topojson.v1.min.js"></script>
 <script src="js/sha512.js"></script>
-<script src="js/communist.js"></script>
+<script src='jam/require.js'></script>
 
 <script>
-var worker = cw({data:function(data,cb){
-    importScripts('js/shp.js');
-	cb(shp.parseZip(data));
-},json:function(data){
-    importScripts("js/topojson.v1.min.js");
-    var name = data[1];
-    //console.log(name);
-    function makeString(buffer){
-        var array = new Uint8Array(buffer);
-        var len = array.length;
-        var outString = "";
-        var i = 0;
-        while(i<len){
-            outString+=String.fromCharCode(array[i++]);
+require(['catiline'],function(cw){
+var worker = cw({init:function(){
+    importScripts('jam/require.js');
+    require.config({baseUrl:this.base});
+},data:function(data,cb){
+        require(['shp'],function(shp){
+	        shp(data).then(cb,function(e){console.log(e)});
+        });
+    },
+    json:function(data){
+        importScripts('js/topojson.v1.min.js');
+        var name = data[1];
+        //console.log(name);
+        function makeString(buffer){
+            var array = new Uint8Array(buffer);
+            var len = array.length;
+            var outString = "";
+            var i = 0;
+            while(i<len){
+                outString+=String.fromCharCode(array[i++]);
+            }
+            return outString;
         }
-        return outString;
-    }
-    var json = JSON.parse(makeString(data[0]));
-    var nom;
-    if(json.type === 'Topology'){
-        for(nom in json.objects){
-            this.fire('json',[topojson.feature(json,json.objects[nom]),nom]);
+        var json = JSON.parse(makeString(data[0]));
+        var nom;
+        if(json.type === 'Topology'){
+            for(nom in json.objects){
+                this.fire('json',[topojson.feature(json,json.objects[nom]),nom]);
+            }
+        }else{
+            this.fire('json',[json,name]);
         }
-    }else{
-        this.fire('json',[json,name]);
-    }
-}});
+    },
+    base : "'"+cw.makeUrl('.')+"'"
+});
 L.Control.Layers.prototype._addItem= function (obj) {
     	var label = document.createElement('label'),
 		    input,
@@ -230,7 +238,7 @@ function drop(e) {
 //add them to the map
 m.addControl(new NewButton());
 
-
+});
 
 </script>
 </body>
