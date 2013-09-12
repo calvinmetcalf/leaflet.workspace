@@ -32,18 +32,21 @@
 
 <script>
 require(['catiline'],function(cw){
-var worker = cw({init:function(){
+var worker = cw({init:function(scope){
     importScripts('jam/require.js');
     require.config({baseUrl:this.base});
+    require(['shp'],function(shp){
+        scope.shp=shp;   
+    });
 },data:function(data,cb){
-        require(['shp'],function(shp){
-	        shp(data).then(cb,function(e){console.log(e)});
-        });
+
+	        this.shp(data).then(cb,function(e){console.log('shit',e)});
+
     },
     json:function(data){
         importScripts('js/topojson.v1.min.js');
         var name = data[1];
-        //console.log(name);
+        console.log(name);
         function makeString(buffer){
             var array = new Uint8Array(buffer);
             var len = array.length;
@@ -54,7 +57,7 @@ var worker = cw({init:function(){
             }
             return outString;
         }
-        var json = JSON.parse(makeString(data[0]));
+        var json = data.length===2?JSON.parse(makeString(data[0])):data[0];
         var nom;
         if(json.type === 'Topology'){
             for(nom in json.objects){
@@ -148,7 +151,7 @@ var NewButton= L.Control.extend({//creating the buttons
                     lc.addOverlay(L.geoJson(e[0],options).addTo(m),e[1]);
                 });
                 worker.on('error',function(e){
-                    console.log(e);
+                    console.warn(e);
                 });
        var doneButton = L.DomUtil.create('button', "btn  btn-primary span3",div);
        doneButton.type = "button";
@@ -182,7 +185,11 @@ var NewButton= L.Control.extend({//creating the buttons
    }
 function handleZipFile(file){
     	var addIt = function(geoJson){
+    	    if(geoJson.type === 'Topology'){
+    	        worker.json([geoJson,geoJson.fileName,true]);
+    	    }else{
 			lc.addOverlay(L.geoJson(geoJson,options).addTo(m),geoJson.fileName);
+    	    }
 		}
    	    var reader = new FileReader();
         reader.onload=function(){
