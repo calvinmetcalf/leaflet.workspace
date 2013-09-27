@@ -2010,6 +2010,11 @@ var jam = {
             "name": "shp",
             "location": "jam/shp",
             "main": "dist/shp.js"
+        },
+        {
+            "name": "spin-js",
+            "location": "jam/spin-js",
+            "main": "spin.js"
         }
     ],
     "version": "0.2.17",
@@ -2028,6 +2033,11 @@ if (typeof require !== "undefined" && require.config) {
             "name": "shp",
             "location": "jam/shp",
             "main": "dist/shp.js"
+        },
+        {
+            "name": "spin-js",
+            "location": "jam/spin-js",
+            "main": "spin.js"
         }
     ],
     "shim": {}
@@ -2045,6 +2055,11 @@ else {
             "name": "shp",
             "location": "jam/shp",
             "main": "dist/shp.js"
+        },
+        {
+            "name": "spin-js",
+            "location": "jam/spin-js",
+            "main": "spin.js"
         }
     ],
     "shim": {}

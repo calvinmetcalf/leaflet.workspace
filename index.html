@@ -28,8 +28,9 @@
 <script src="js/leaflet.hash.js"></script>
 <script src="js/topojson.v1.min.js"></script>
 <script src="js/sha512.js"></script>
-<script src='jam/require.js'></script>
 
+<script src='jam/require.js'></script>
+<script src='js/leaflet.spin.js'></script>
 <script>
 require(['catiline'],function(cw){
 var worker = cw({init:function(scope){
@@ -46,7 +47,7 @@ var worker = cw({init:function(scope){
     json:function(data){
         importScripts('js/topojson.v1.min.js');
         var name = data[1];
-        console.log(name);
+        //console.log(name);
         function makeString(buffer){
             var array = new Uint8Array(buffer);
             var len = array.length;
@@ -165,6 +166,8 @@ var NewButton= L.Control.extend({//creating the buttons
        handleFile(file);
    }
    function handleFile(file){
+   console.log('spinning');
+        m.spin(true);
        if(file.name.slice(-3)==='zip'){
            return handleZipFile(file);
        }
@@ -188,6 +191,8 @@ function handleZipFile(file){
     	    if(geoJson.type === 'Topology'){
     	        worker.json([geoJson,geoJson.fileName,true]);
     	    }else{
+    	    m.spin(false);
+    	    console.log('not spinning');
 			lc.addOverlay(L.geoJson(geoJson,options).addTo(m),geoJson.fileName);
     	    }
 		}
