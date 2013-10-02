@@ -24,7 +24,8 @@
   "jam":{
       "dependencies":{
           "catiline":">2.8.0",
-          "shp":">=1.5.2"
+          "shp":">=2.1.2",
+          "spin-js":"1.2.5-jam.1"
       }
   }
 }
