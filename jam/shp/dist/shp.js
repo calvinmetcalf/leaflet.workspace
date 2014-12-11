@@ -1,509 +1,466 @@
-;(function(){
-
-/**
- * Require the given path.
- *
- * @param {String} path
- * @return {Object} exports
- * @api public
- */
-
-function require(path, parent, orig) {
-  var resolved = require.resolve(path);
-
-  // lookup failed
-  if (null == resolved) {
-    orig = orig || path;
-    parent = parent || 'root';
-    var err = new Error('Failed to require "' + orig + '" from "' + parent + '"');
-    err.path = orig;
-    err.parent = parent;
-    err.require = true;
-    throw err;
-  }
-
-  var module = require.modules[resolved];
-
-  // perform real require()
-  // by invoking the module's
-  // registered function
-  if (!module.exports) {
-    module.exports = {};
-    module.client = module.component = true;
-    module.call(this, module.exports, require.relative(resolved), module);
-  }
-
-  return module.exports;
+!function(e){if("object"==typeof exports&&"undefined"!=typeof module)module.exports=e();else if("function"==typeof define&&define.amd)define([],e);else{var f;"undefined"!=typeof window?f=window:"undefined"!=typeof global?f=global:"undefined"!=typeof self&&(f=self),f.shp=e()}}(function(){var define,module,exports;return (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
+'use strict';
+var Promise = require('lie');
+module.exports = binaryAjax;
+function binaryAjax(url){
+	return new Promise(function(resolve,reject){
+		var type = url.slice(-3);
+		var ajax = new XMLHttpRequest();
+		ajax.open('GET',url,true);
+		if(type !== 'prj'){
+			ajax.responseType='arraybuffer';
+		}
+		ajax.addEventListener('load', function (){
+			if(ajax.status>399){
+				if(type==='prj'){
+					return resolve(false);
+				}else{
+					return reject(new Error(ajax.status));
+				}
+			}
+			resolve(ajax.response);
+		}, false);
+		ajax.send();
+	});
 }
-
-/**
- * Registered modules.
- */
-
-require.modules = {};
-
-/**
- * Registered aliases.
- */
-
-require.aliases = {};
-
-/**
- * Resolve `path`.
- *
- * Lookup:
- *
- *   - PATH/index.js
- *   - PATH.js
- *   - PATH
- *
- * @param {String} path
- * @return {String} path or null
- * @api private
- */
-
-require.resolve = function(path) {
-  if (path.charAt(0) === '/') path = path.slice(1);
-
-  var paths = [
-    path,
-    path + '.js',
-    path + '.json',
-    path + '/index.js',
-    path + '/index.json'
-  ];
-
-  for (var i = 0; i < paths.length; i++) {
-    var path = paths[i];
-    if (require.modules.hasOwnProperty(path)) return path;
-    if (require.aliases.hasOwnProperty(path)) return require.aliases[path];
-  }
+},{"lie":27}],2:[function(require,module,exports){
+(function (Buffer){
+'use strict';
+var proj4 = require('proj4');
+var unzip = require('./unzip');
+var binaryAjax = require('./binaryajax');
+var parseShp = require('./parseShp');
+var toArrayBuffer = require('./toArrayBuffer');
+var parseDbf = require('parsedbf');
+var Promise = require('lie');
+var Cache = require('lru-cache');
+var cache = new Cache({
+	max: 20
+});
+function shp(base, whiteList) {
+	if (cache.has(base)) {
+		return Promise.resolve(cache.get(base));
+	}
+	return shp.getShapefile(base, whiteList).then(function (resp) {
+		cache.set(base, resp);
+		return resp;
+	});
+}
+shp.combine = function(arr) {
+	var out = {};
+	out.type = 'FeatureCollection';
+	out.features = [];
+	var i = 0;
+	var len = arr[0].length;
+	while (i < len) {
+		out.features.push({
+			'type': 'Feature',
+			'geometry': arr[0][i],
+			'properties': arr[1][i]
+		});
+		i++;
+	}
+	return out;
+};
+shp.parseZip = function(buffer, whiteList) {
+	var key;
+	var zip = unzip(buffer);
+	var names = [];
+	whiteList = whiteList || [];
+	for (key in zip) {
+		if (key.indexOf('__MACOSX') !== -1) {
+			continue;
+		}
+		if (key.slice(-3).toLowerCase() === 'shp') {
+			names.push(key.slice(0, - 4));
+		}
+		else if (key.slice(-3).toLowerCase() === 'dbf') {
+			zip[key.slice(0, -3) + key.slice(-3).toLowerCase()] = parseDbf(zip[key]);
+		}
+		else if (key.slice(-3).toLowerCase() === 'prj') {
+			zip[key.slice(0, -3) + key.slice(-3).toLowerCase()] = proj4(zip[key]);
+		}
+		else if (key.slice(-4).toLowerCase() === 'json' || whiteList.indexOf(key.split('.').pop()) > -1) {
+			names.push(key.slice(0, -3) + key.slice(-3).toLowerCase());
+		}
+	}
+	if (!names.length) {
+		throw new Error('no layers founds');
+	}
+	var geojson = names.map(function(name) {
+		var parsed;
+		if (name.slice(-4).toLowerCase() === 'json') {
+			parsed = JSON.parse(zip[name]);
+			parsed.fileName = name.slice(0, name.lastIndexOf('.'));
+		}
+		else if (whiteList.indexOf(name.slice(name.lastIndexOf('.') + 1)) > -1) {
+			parsed = zip[name];
+			parsed.fileName = name;
+		}
+		else {
+			parsed = shp.combine([parseShp(zip[name + '.shp'], zip[name + '.prj']), zip[name + '.dbf']]);
+			parsed.fileName = name;
+		}
+		return parsed;
+	});
+	if (geojson.length === 1) {
+		return geojson[0];
+	}
+	else {
+		return geojson;
+	}
 };
 
-/**
- * Normalize `path` relative to the current path.
- *
- * @param {String} curr
- * @param {String} path
- * @return {String}
- * @api private
- */
+function getZip(base, whiteList) {
+	return binaryAjax(base).then(function(a) {
+		return shp.parseZip(a, whiteList);
+	});
+}
+shp.getShapefile = function(base, whiteList) {
+	if (typeof base === 'string') {
+		if (base.slice(-4) === '.zip') {
+			return getZip(base, whiteList);
+		}
+		else {
+			return Promise.all([
+				Promise.all([
+					binaryAjax(base + '.shp'),
+					binaryAjax(base + '.prj')
+				]).then(function(args) {
+					return parseShp(args[0], args[1] ? proj4(args[1]) : false);
+				}),
+				binaryAjax(base + '.dbf').then(parseDbf)
+			]).then(shp.combine);
+		}
+	}
+	else {
+		return new Promise(function(resolve) {
+			resolve(shp.parseZip(base));
+		});
+	}
+};
+shp.parseShp = function (shp, prj) {
+	if (Buffer.isBuffer(shp)) {
+		shp = toArrayBuffer(shp);
+	}
+	if (Buffer.isBuffer(prj)) {
+		prj = prj.toString();
+	}
+	if (typeof prj === 'string') {
+		prj = proj4(prj);
+		return parseShp(shp, prj);
+	} else {
+		return parseShp(shp);
+	}
+};
+shp.parseDbf = function (dbf) {
+	if (Buffer.isBuffer(dbf)) {
+		dbf = toArrayBuffer(dbf);
+	}
+	return parseDbf(dbf);
+};
+module.exports = shp;
 
-require.normalize = function(curr, path) {
-  var segs = [];
-
-  if ('.' != path.charAt(0)) return path;
-
-  curr = curr.split('/');
-  path = path.split('/');
-
-  for (var i = 0; i < path.length; ++i) {
-    if ('..' == path[i]) {
-      curr.pop();
-    } else if ('.' != path[i] && '' != path[i]) {
-      segs.push(path[i]);
-    }
-  }
-
-  return curr.concat(segs).join('/');
+}).call(this,require("buffer").Buffer)
+},{"./binaryajax":1,"./parseShp":3,"./toArrayBuffer":4,"./unzip":5,"buffer":113,"lie":27,"lru-cache":42,"parsedbf":43,"proj4":79}],3:[function(require,module,exports){
+'use strict';
+function isClockWise(array){
+	var sum = 0;
+	var i = 1;
+	var len = array.length;
+	var prev,cur;
+	while(i<len){
+		prev = cur||array[0];
+		cur = array[i];
+		sum += ((cur[0]-prev[0])*(cur[1]+prev[1]));
+		i++;
+	}
+	return sum > 0;
+}
+function polyReduce(a,b){
+	if(isClockWise(b)||!a.length){
+		a.push([b]);
+	}else{
+		a[a.length-1].push(b);
+	}
+	return a;
+}
+ParseShp.prototype.parsePoint = function (data){
+	return {
+		'type': 'Point',
+		'coordinates': this.parseCoord(data,0)
+	};
+};
+ParseShp.prototype.parseZPoint = function (data){
+	var pointXY = this.parsePoint(data);
+	pointXY.coordinates.push(this.parseCoord(data,16));
+	return pointXY;
+};
+ParseShp.prototype.parsePointArray = function (data,offset,num){
+	var out = [];
+	var done = 0;
+	while(done<num){
+		out.push(this.parseCoord(data,offset));
+		offset += 16;
+		done++;
+	}
+	return out;
+};
+ParseShp.prototype.parseZPointArray = function (data,zOffset,num,coordinates){
+	var i = 0;
+	while(i<num){
+		coordinates[i].push(data.getFloat64(zOffset,true));
+		i++;
+		zOffset += 8;
+	}
+	return coordinates;
+};
+ParseShp.prototype.parseArrayGroup = function (data,offset,partOffset,num,tot){
+	var out = [];
+	var done = 0;
+	var curNum,nextNum=0,pointNumber;
+	while(done<num){
+		done++;
+		partOffset += 4;
+		curNum = nextNum;
+		if(done===num){
+			nextNum = tot;
+		}else{
+			nextNum = data.getInt32(partOffset,true);
+		}
+		pointNumber = nextNum - curNum;
+		if(!pointNumber){
+			continue;
+		}
+		out.push(this.parsePointArray(data,offset,pointNumber));
+		offset += (pointNumber<<4);
+	}
+	return out;
+};
+ParseShp.prototype.parseZArrayGroup = function(data,zOffset,num,coordinates){
+	var i = 0;
+	while(i<num){
+		coordinates[i] = this.parseZPointArray(data,zOffset,coordinates[i].length,coordinates[i]);
+		zOffset += (coordinates[i].length<<3);
+		i++;
+	}
+	return coordinates;
+};
+ParseShp.prototype.parseMultiPoint = function (data){
+	var out = {};
+	out.bbox = [
+		data.getFloat64(0,true),
+		data.getFloat64(8,true),
+		data.getFloat64(16,true),
+		data.getFloat64(24,true)
+	];
+	var num = data.getInt32(32,true);
+	var offset = 36;
+	if(num===1){
+		out.type = 'Point';
+		out.coordinates = this.parseCoord(data,offset);
+	}else{
+		out.type = 'MultiPoint';
+		out.coordinates = this.parsePointArray(data,offset,num);
+	}
+	return out;
+};
+ParseShp.prototype.parseZMultiPoint = function(data){
+	var geoJson = this.parseMultiPoint(data);
+	var num;
+	if(geoJson.type === 'Point'){
+		geoJson.coordinates.push(data.getFloat64(72,true));
+		return geoJson;
+	}else{
+		num = geoJson.coordinates.length;
+	}
+	var zOffset = 56 + (num<<4);
+	geoJson.coordinates =  this.parseZPointArray(data,zOffset,num,geoJson.coordinates);
+	return geoJson;
+};
+ParseShp.prototype.parsePolyline = function (data){
+	var out = {};
+	out.bbox = [
+		data.getFloat64(0,true),
+		data.getFloat64(8,true),
+		data.getFloat64(16,true),
+		data.getFloat64(24,true)
+	];
+	var numParts = data.getInt32(32,true);
+	var num = data.getInt32(36,true);
+	var offset,partOffset;
+	if(numParts === 1){
+		out.type = 'LineString';
+		offset = 44;
+		out.coordinates = this.parsePointArray(data,offset,num);
+	}else{
+		out.type = 'MultiLineString';
+		offset = 40 + (numParts<<2);
+		partOffset = 40;
+		out.coordinates = this.parseArrayGroup(data,offset,partOffset,numParts,num);
+	}
+	return out;
+};
+ParseShp.prototype.parseZPolyline = function(data){
+	var geoJson = this.parsePolyline(data);
+	var num = geoJson.coordinates.length;
+	var zOffset = 60 + (num<<4);
+	if(geoJson.type === 'LineString'){
+		geoJson.coordinates =  this.parseZPointArray(data,zOffset,num,geoJson.coordinates);
+		return geoJson;
+	}else{
+		geoJson.coordinates =  this.parseZArrayGroup(data,zOffset,num,geoJson.coordinates);
+		return geoJson;
+	}
+};
+ParseShp.prototype.polyFuncs = function (out){
+	if(out.type === 'LineString'){
+		out.type = 'Polygon';
+		out.coordinates = [out.coordinates];
+		return out;
+	}else{
+		out.coordinates = out.coordinates.reduce(polyReduce,[]);
+		if(out.coordinates.length === 1){
+			out.type = 'Polygon';
+			out.coordinates = out.coordinates[0];
+			return out;
+		}else{
+			out.type = 'MultiPolygon';
+			return out;
+		}
+	}
+};
+ParseShp.prototype.parsePolygon = function (data){
+	return this.polyFuncs(this.parsePolyline(data));
+};
+ParseShp.prototype.parseZPolygon = function(data){
+	return this.polyFuncs(this.parseZPolyline(data));
+};
+var shpFuncObj = {
+	1:'parsePoint',
+	3:'parsePolyline',
+	5:'parsePolygon',
+	8:'parseMultiPoint',
+	11:'parseZPoint',
+	13:'parseZPolyline',
+	15:'parseZPolygon',
+	18:'parseZMultiPoint'
 };
 
-/**
- * Register module at `path` with callback `definition`.
- *
- * @param {String} path
- * @param {Function} definition
- * @api private
- */
 
-require.register = function(path, definition) {
-  require.modules[path] = definition;
-};
 
-/**
- * Alias a module definition.
- *
- * @param {String} from
- * @param {String} to
- * @api private
- */
-
-require.alias = function(from, to) {
-  if (!require.modules.hasOwnProperty(from)) {
-    throw new Error('Failed to alias "' + from + '", it does not exist');
-  }
-  require.aliases[to] = from;
-};
-
-/**
- * Return a require function relative to the `parent` path.
- *
- * @param {String} parent
- * @return {Function}
- * @api private
- */
-
-require.relative = function(parent) {
-  var p = require.normalize(parent, '..');
-
-  /**
-   * lastIndexOf helper.
-   */
-
-  function lastIndexOf(arr, obj) {
-    var i = arr.length;
-    while (i--) {
-      if (arr[i] === obj) return i;
-    }
-    return -1;
-  }
-
-  /**
-   * The relative require() itself.
-   */
-
-  function localRequire(path) {
-    var resolved = localRequire.resolve(path);
-    return require(resolved, parent, path);
-  }
-
-  /**
-   * Resolve relative to the parent.
-   */
-
-  localRequire.resolve = function(path) {
-    var c = path.charAt(0);
-    if ('/' == c) return path.slice(1);
-    if ('.' == c) return require.normalize(p, path);
-
-    // resolve deps by returning
-    // the dep in the nearest "deps"
-    // directory
-    var segs = parent.split('/');
-    var i = lastIndexOf(segs, 'deps') + 1;
-    if (!i) i = 0;
-    path = segs.slice(0, i + 1).join('/') + '/deps/' + path;
-    return path;
-  };
-
-  /**
-   * Check if module is defined at `path`.
-   */
-
-  localRequire.exists = function(path) {
-    return require.modules.hasOwnProperty(localRequire.resolve(path));
-  };
-
-  return localRequire;
-};
-require.register("calvinmetcalf-setImmediate/lib/index.js", function(exports, require, module){
-"use strict";
-var types = [
-    require("./nextTick"),
-    require("./mutation"),
-    require("./realSetImmediate"),
-    require("./postMessage"),
-    require("./messageChannel"),
-    require("./stateChange"),
-    require("./timeout")
-];
-var handlerQueue = [];
-
-function drainQueue() {
-    var i = 0,
-        task,
-        innerQueue = handlerQueue;
-	handlerQueue = [];
-	/*jslint boss: true */
-	while (task = innerQueue[i++]) {
-		task();
+function makeParseCoord(trans){
+	if(trans){
+		return function(data,offset){
+			return trans.inverse([data.getFloat64(offset,true),data.getFloat64(offset+8,true)]);
+		};
+	}else{
+		return function(data,offset){
+			return [data.getFloat64(offset,true),data.getFloat64(offset+8,true)];
+		};
 	}
 }
-var nextTick;
-types.some(function (obj) {
-    var t = obj.test();
-    if (t) {
-        nextTick = obj.install(drainQueue);
-    }
-    return t;
-});
-var retFunc = function (task) {
-    var len, args;
-    if (arguments.length > 1 && typeof task === "function") {
-        args = Array.prototype.slice.call(arguments, 1);
-        args.unshift(undefined);
-        task = task.bind.apply(task, args);
-    }
-    if ((len = handlerQueue.push(task)) === 1) {
-        nextTick(drainQueue);
-    }
-    return len;
-};
-retFunc.clear = function (n) {
-    if (n <= handlerQueue.length) {
-        handlerQueue[n - 1] = function () {};
-    }
-    return this;
-};
-module.exports = retFunc;
-
-});
-require.register("calvinmetcalf-setImmediate/lib/nextTick.js", function(exports, require, module){
-"use strict";
-exports.test = function () {
-    // Don't get fooled by e.g. browserify environments.
-    return typeof process === "object" && Object.prototype.toString.call(process) === "[object process]";
-};
-
-exports.install = function () {
-    return process.nextTick;
-};
-});
-require.register("calvinmetcalf-setImmediate/lib/postMessage.js", function(exports, require, module){
-"use strict";
-var globe = require("./global");
-exports.test = function () {
-    // The test against `importScripts` prevents this implementation from being installed inside a web worker,
-    // where `global.postMessage` means something completely different and can"t be used for this purpose.
-
-    if (!globe.postMessage || globe.importScripts) {
-        return false;
-    }
-
-    var postMessageIsAsynchronous = true;
-    var oldOnMessage = globe.onmessage;
-    globe.onmessage = function () {
-        postMessageIsAsynchronous = false;
-    };
-    globe.postMessage("", "*");
-    globe.onmessage = oldOnMessage;
-
-    return postMessageIsAsynchronous;
-};
-
-exports.install = function (func) {
-    var codeWord = "com.calvinmetcalf.setImmediate" + Math.random();
-    function globalMessage(event) {
-        if (event.source === globe && event.data === codeWord) {
-            func();
-        }
-    }
-    if (globe.addEventListener) {
-        globe.addEventListener("message", globalMessage, false);
-    } else {
-        globe.attachEvent("onmessage", globalMessage);
-    }
-    return function () {
-        globe.postMessage(codeWord, "*");
-    };
-};
-});
-require.register("calvinmetcalf-setImmediate/lib/messageChannel.js", function(exports, require, module){
-"use strict";
-var globe = require("./global");
-exports.test = function () {
-    return !!globe.MessageChannel;
-};
-
-exports.install = function (func) {
-    var channel = new globe.MessageChannel();
-    channel.port1.onmessage = func;
-    return function () {
-        channel.port2.postMessage(0);
-    };
-};
-});
-require.register("calvinmetcalf-setImmediate/lib/stateChange.js", function(exports, require, module){
-"use strict";
-var globe = require("./global");
-exports.test = function () {
-    return "document" in globe && "onreadystatechange" in globe.document.createElement("script");
-};
-
-exports.install = function (handle) {
-    return function () {
-
-        // Create a <script> element; its readystatechange event will be fired asynchronously once it is inserted
-        // into the document. Do so, thus queuing up the task. Remember to clean up once it's been called.
-        var scriptEl = globe.document.createElement("script");
-        scriptEl.onreadystatechange = function () {
-            handle();
-
-            scriptEl.onreadystatechange = null;
-            scriptEl.parentNode.removeChild(scriptEl);
-            scriptEl = null;
-        };
-        globe.document.documentElement.appendChild(scriptEl);
-
-        return handle;
-    };
-};
-});
-require.register("calvinmetcalf-setImmediate/lib/timeout.js", function(exports, require, module){
-"use strict";
-exports.test = function () {
-    return true;
-};
-
-exports.install = function (t) {
-    return function () {
-        setTimeout(t, 0);
-    };
-};
-});
-require.register("calvinmetcalf-setImmediate/lib/global.js", function(exports, require, module){
-module.exports = typeof global === "object" && global ? global : this;
-});
-require.register("calvinmetcalf-setImmediate/lib/mutation.js", function(exports, require, module){
-"use strict";
-//based off rsvp
-//https://github.com/tildeio/rsvp.js/blob/master/lib/rsvp/async.js
-var globe = require("./global");
-
-var MutationObserver = globe.MutationObserver || globe.WebKitMutationObserver;
-
-exports.test = function () {
-    return MutationObserver;
-};
-
-exports.install = function (handle) {
-    var observer = new MutationObserver(handle);
-    var element = globe.document.createElement("div");
-    observer.observe(element, { attributes: true });
-
-    // Chrome Memory Leak: https://bugs.webkit.org/show_bug.cgi?id=93661
-    globe.addEventListener("unload", function () {
-        observer.disconnect();
-        observer = null;
-    }, false);
-    return function () {
-        element.setAttribute("drainQueue", "drainQueue");
-    };
-};
-});
-require.register("calvinmetcalf-setImmediate/lib/realSetImmediate.js", function(exports, require, module){
-"use strict";
-var globe = require("./global");
-exports.test = function () {
-    return  globe.setImmediate;
-};
-
-exports.install = function (handle) {
-    //return globe.setImmediate.bind(globe, handle);
-    return globe.setTimeout.bind(globe,handle,0);
-};
-
-});
-require.register("calvinmetcalf-lie/lie.js", function(exports, require, module){
-var immediate = require('immediate');
-// Creates a deferred: an object with a promise and corresponding resolve/reject methods
-function Promise(resolver) {
-     if (!(this instanceof Promise)) {
-        return new Promise(resolver);
-    }
-    var queue = [];
-    var resolved = false;
-    // The `handler` variable points to the function that will
-    // 1) handle a .then(onFulfilled, onRejected) call
-    // 2) handle a .resolve or .reject call (if not fulfilled)
-    // Before 2), `handler` holds a queue of callbacks.
-    // After 2), `handler` is a simple .then handler.
-    // We use only one function to save memory and complexity.
-     // Case 1) handle a .then(onFulfilled, onRejected) call
-    function pending(onFulfilled, onRejected){
-        return Promise(function(resolver,rejecter){
-            queue.push({
-                resolve: onFulfilled,
-                reject: onRejected,
-                resolver:resolver,
-                rejecter:rejecter
-            });
-        });
-    }
-    function then(onFulfilled, onRejected) {
-        return resolved?resolved(onFulfilled, onRejected):pending(onFulfilled, onRejected);
-    }
-    // Case 2) handle a .resolve or .reject call
-        // (`onFulfilled` acts as a sentinel)
-        // The actual function signature is
-        // .re[ject|solve](sentinel, success, value)
-    function resolve(success, value){
-        var action = success ? 'resolve' : 'reject';
-        var queued;
-        var callback;
-        for (var i = 0, l = queue.length; i < l; i++) {
-            queued = queue[i];
-            callback = queued[action];
-            if (typeof callback === 'function') {
-                immediate(execute,callback, value, queued.resolver, queued.rejecter);
-            }else if(success){
-                queued.resolver(value);
-            }else{
-                queued.rejecter(value);
-            }
-        }
-        // Replace this handler with a simple resolved or rejected handler
-        resolved = createHandler(then, value, success);
-    }
-    this.then = then;
-    function yes(value) {
-        if (!resolved) {
-            resolve(true, value);
-        }
-    }
-    function no (reason) {
-        if (!resolved) {
-            resolve(false, reason);
-        }
-    }
-    try{
-        resolver(function(a){
-            if(a && typeof a.then==='function'){
-                a.then(yes,no);
-            }else{
-                yes(a);
-            }
-        },no);
-    }catch(e){
-        no(e);
-    }
+function ParseShp(buffer,trans){
+	if(!(this instanceof ParseShp)){
+		return new ParseShp(buffer,trans);
+	}
+	this.buffer = buffer;
+	this.shpFuncs(trans);
+	this.rows = this.getRows();
 }
-
-// Creates a fulfilled or rejected .then function
-function createHandler(then, value, success) {
-    return function(onFulfilled, onRejected) {
-        var callback = success ? onFulfilled : onRejected;
-        if (typeof callback !== 'function') {
-            return Promise(function(resolve,reject){
-                then(resolve,reject);
-            });
-        }
-        return Promise(function(resolve,reject){
-            immediate(execute,callback,value,resolve,reject);
-       });
-    };
+ParseShp.prototype.shpFuncs = function (tran){
+	var num = this.getShpCode();
+	if(num>20){
+		num -= 20;
+	}
+	if(!(num in shpFuncObj)){
+		throw new Error('I don\'t know that shp type');
+	}
+	this.parseFunc = this[shpFuncObj[num]];
+	this.parseCoord = makeParseCoord(tran);
+};
+ParseShp.prototype.getShpCode = function(){
+	return this.parseHeader().shpCode;
+};
+ParseShp.prototype.parseHeader = function (){
+	var view = new DataView(this.buffer,0,100) ;
+	return {
+		length : view.getInt32(6<<2,false),
+		version : view.getInt32(7<<2,true),
+		shpCode : view.getInt32(8<<2,true),
+		bbox : [
+			view.getFloat64(9<<2,true),
+			view.getFloat64(11<<2,true),
+			view.getFloat64(13<<2,true),
+			view.getFloat64(13<<2,true)
+		]
+	};
+};
+ParseShp.prototype.getRows = function(){
+	var offset=100;
+	var len = this.buffer.byteLength;
+	var out = [];
+	var current;
+	while(offset<len){
+		current = this.getRow(offset);
+		offset += 8;
+		offset += current.len;
+		if(current.type){
+			out.push(this.parseFunc(current.data));
+		}
+	}
+	return out;
+};
+ParseShp.prototype.getRow = function(offset){
+	var view = new DataView(this.buffer,offset,12);
+	var len = view.getInt32(4,false) << 1;
+	var data = new DataView(this.buffer,offset+12,len - 4);
+	
+	return {
+		id:view.getInt32(0,false),
+		len:len,
+		data:data,
+		type:view.getInt32(8,true)
+	};
+};
+module.exports = function(buffer, trans){
+	return new ParseShp(buffer, trans).rows;
+};
+},{}],4:[function(require,module,exports){
+'use strict';
+module.exports = toArrayBuffer;
+function toArrayBuffer(buffer) {
+    var arrayBuffer = new ArrayBuffer(buffer.length);
+    var view = new Uint8Array(arrayBuffer);
+    var i = -1;
+    var len = buffer.length;
+    while (++i < len) {
+        view[i] = buffer[i];
+    }
+    return arrayBuffer;
 }
+},{}],5:[function(require,module,exports){
+'use strict';
 
-// Executes the callback with the specified value,
-// resolving or rejecting the deferred
-function execute(callback, value, resolve, reject) {
-        try {
-            var result = callback(value);
-            if (result && typeof result.then === 'function') {
-                result.then(resolve, reject);
-            }
-            else {
-                resolve(result);
-            }
-        }
-        catch (error) {
-            reject(error);
-        }
-}
-module.exports = Promise;
+var JSZip = require('jszip');
+module.exports = function(buffer) {
+	var zip = new JSZip(buffer);
+	var files = zip.file(/.+/);
+	var out = {};
+	files.forEach(function(a) {
+		if (a.name.slice(-3).toLowerCase() === 'shp' || a.name.slice(-3).toLowerCase() === 'dbf') {
+			out[a.name] = a.asText();
+			out[a.name] = a.asArrayBuffer();
+		}
+		else {
+			out[a.name] = a.asText();
+		}
+	});
+	return out;
+};
 
-});
-require.register("calvinmetcalf-jszip/lib/base64.js", function(exports, require, module){
+},{"jszip":12}],6:[function(require,module,exports){
+'use strict';
 // private property
 var _keyStr = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
 
@@ -574,8 +531,8 @@ exports.decode = function(input, utf8) {
 
 };
 
-});
-require.register("calvinmetcalf-jszip/lib/compressedObject.js", function(exports, require, module){
+},{}],7:[function(require,module,exports){
+'use strict';
 function CompressedObject() {
     this.compressedSize = 0;
     this.uncompressedSize = 0;
@@ -604,8 +561,8 @@ CompressedObject.prototype = {
 };
 module.exports = CompressedObject;
 
-});
-require.register("calvinmetcalf-jszip/lib/compressions.js", function(exports, require, module){
+},{}],8:[function(require,module,exports){
+'use strict';
 exports.STORE = {
     magic: "\x00\x00",
     compress: function(content) {
@@ -619,8 +576,8 @@ exports.STORE = {
 };
 exports.DEFLATE = require('./flate');
 
-});
-require.register("calvinmetcalf-jszip/lib/dataReader.js", function(exports, require, module){
+},{"./flate":11}],9:[function(require,module,exports){
+'use strict';
 var utils = require('./utils');
 
 function DataReader(data) {
@@ -728,23 +685,36 @@ DataReader.prototype = {
 };
 module.exports = DataReader;
 
-});
-require.register("calvinmetcalf-jszip/lib/defaults.js", function(exports, require, module){
+},{"./utils":19}],10:[function(require,module,exports){
+'use strict';
 exports.base64 = false;
 exports.binary = false;
 exports.dir = false;
 exports.date = null;
 exports.compression = null;
-});
-require.register("calvinmetcalf-jszip/lib/index.js", function(exports, require, module){
+
+},{}],11:[function(require,module,exports){
+'use strict';
+var USE_TYPEDARRAY = (typeof Uint8Array !== 'undefined') && (typeof Uint16Array !== 'undefined') && (typeof Uint32Array !== 'undefined');
+
+var  ZlibDeflate = require('zlibjs/bin/rawdeflate.min').Zlib;
+var  ZlibInflate = require('zlibjs/bin/rawinflate.min').Zlib;
+exports.uncompressInputType = USE_TYPEDARRAY ? "uint8array" : "array";
+exports.compressInputType = USE_TYPEDARRAY ? "uint8array" : "array";
+
+exports.magic = "\x08\x00";
+exports.compress = function(input) {
+    var deflate = new ZlibDeflate.RawDeflate(input);
+    return deflate.compress();
+};
+exports.uncompress =  function(input) {
+    var inflate = new ZlibInflate.RawInflate(input);
+    return inflate.decompress();
+};
+
+},{"zlibjs/bin/rawdeflate.min":22,"zlibjs/bin/rawinflate.min":23}],12:[function(require,module,exports){
+'use strict';
 /**
-
-JSZip - A Javascript class for generating and reading zip files
-<http://stuartk.com/jszip>
-
-(c) 2009-2012 Stuart Knightley <stuart [at] stuartk.com>
-Dual licenced under the MIT license or GPLv3. See https://raw.github.com/Stuk/jszip/master/LICENSE.markdown.
-
 Usage:
    zip = new JSZip();
    zip.file("hello.txt", "Hello, World!").file("tempfile", "nothing");
@@ -762,35 +732,31 @@ Usage:
  * @param {String=|ArrayBuffer=|Uint8Array=} data the data to load, if any (optional).
  * @param {Object=} options the options for creating this objects (optional).
  */
-
-var JSZip = function(data, options) {
+function JSZip(data, options) {
     // object containing the files :
     // {
     //   "folder/" : {...},
     //   "folder/data.txt" : {...}
     // }
+    
     this.files = {};
 
     // Where we are in the hierarchy
     this.root = "";
-
     if (data) {
         this.load(data, options);
     }
-};
-
-
-
-JSZip.prototype = require('./object');
-JSZip.prototype.clone = function() {
-    var newObj = new JSZip();
-    for (var i in this) {
-        if (typeof this[i] !== "function") {
-            newObj[i] = this[i];
+    this.clone = function() {
+        var newObj = new JSZip();
+        for (var i in this) {
+            if (typeof this[i] !== "function") {
+                newObj[i] = this[i];
+            }
         }
-    }
-    return newObj;
-};
+        return newObj;
+    };
+}
+JSZip.prototype = require('./object');
 JSZip.prototype.load = require('./load');
 JSZip.support = require('./support');
 JSZip.utils = require('./utils');
@@ -798,8 +764,8 @@ JSZip.base64 = require('./base64');
 JSZip.compressions = require('./compressions');
 module.exports = JSZip;
 
-});
-require.register("calvinmetcalf-jszip/lib/load.js", function(exports, require, module){
+},{"./base64":6,"./compressions":8,"./load":13,"./object":14,"./support":17,"./utils":19}],13:[function(require,module,exports){
+'use strict';
 var base64 = require('./base64');
 var ZipEntries = require('./zipEntries');
 module.exports = function(data, options) {
@@ -824,30 +790,8 @@ module.exports = function(data, options) {
     return this;
 };
 
-});
-require.register("calvinmetcalf-jszip/lib/nodeBufferReader.js", function(exports, require, module){
-var Uint8ArrayReader = require('./uint8ArrayReader');
-
-function NodeBufferReader(data) {
-    this.data = data;
-    this.length = this.data.length;
-    this.index = 0;
-}
-NodeBufferReader.prototype = new Uint8ArrayReader();
-
-/**
- * @see DataReader.readData
- */
-NodeBufferReader.prototype.readData = function(size) {
-    this.checkOffset(size);
-    var result = this.data.slice(this.index, this.index + size);
-    this.index += size;
-    return result;
-};
-module.exports = NodeBufferReader;
-
-});
-require.register("calvinmetcalf-jszip/lib/object.js", function(exports, require, module){
+},{"./base64":6,"./zipEntries":20}],14:[function(require,module,exports){
+'use strict';
 var support = require('./support');
 var utils = require('./utils');
 var signature = require('./signature');
@@ -855,11 +799,22 @@ var defaults = require('./defaults');
 var base64 = require('./base64');
 var compressions = require('./compressions');
 var CompressedObject = require('./compressedObject');
+var nodeBuffer = require('./nodeBuffer');
 /**
  * Returns the raw data of a ZipObject, decompress the content if necessary.
  * @param {ZipObject} file the file to use.
  * @return {String|ArrayBuffer|Uint8Array|Buffer} the data.
  */
+
+var textEncoder, textDecoder;
+if (
+    support.uint8array &&
+    typeof TextEncoder === "function" &&
+    typeof TextDecoder === "function"
+) {
+    textEncoder = new TextEncoder("utf-8");
+    textDecoder = new TextDecoder("utf-8");
+}
 
 var getRawData = function(file) {
     if (file._data instanceof CompressedObject) {
@@ -893,17 +848,17 @@ var getBinaryData = function(file) {
         if (!file.options.binary) {
             // unicode text !
             // unicode string => binary string is a painful process, check if we can avoid it.
-            if (support.uint8array && typeof TextEncoder === "function") {
-                return TextEncoder("utf-8").encode(result);
+            if (textEncoder) {
+                return textEncoder.encode(result);
             }
             if (support.nodebuffer) {
-                return new Buffer(result, "utf-8");
+                return nodeBuffer(result, "utf-8");
             }
         }
         return file.asBinary();
     }
     return result;
-}
+};
 
 /**
  * Transform this._data into a string.
@@ -1031,7 +986,7 @@ var extend = function() {
  */
 var prepareFileAttrs = function(o) {
     o = o || {};
-    if (o.base64 === true && o.binary == null) {
+    if (o.base64 === true && (o.binary === null || o.binary === undefined)) {
         o.binary = true;
     }
     o = extend(o, defaults);
@@ -1088,7 +1043,9 @@ var fileAdd = function(name, data, o) {
         }
     }
 
-    return this.files[name] = new ZipObject(name, data, o);
+    var object = new ZipObject(name, data, o);
+    this.files[name] = object;
+    return object;
 };
 
 
@@ -1151,7 +1108,7 @@ var generateCompressedObjectFrom = function(file, compression) {
             result.compressedContent = file._data.getCompressedContent();
         }
         else {
-            content = file._data.getContent()
+            content = file._data.getContent();
             // need to decompress / recompress
             result.compressedContent = compression.compress(utils.transformTo(compression.compressInputType, content));
         }
@@ -1188,7 +1145,9 @@ var generateZipParts = function(name, file, compressedObject, offset) {
         useUTF8 = utfEncodedFileName !== file.name,
         o = file.options,
         dosTime,
-        dosDate;
+        dosDate,
+        extraFields = "",
+        unicodePathExtraField = "";
 
     // date
     // @see http://www.delorie.com/djgpp/doc/rbinter/it/52/13.html
@@ -1207,6 +1166,32 @@ var generateZipParts = function(name, file, compressedObject, offset) {
     dosDate = dosDate << 5;
     dosDate = dosDate | o.date.getDate();
 
+    if (useUTF8) {
+        // set the unicode path extra field. unzip needs at least one extra
+        // field to correctly handle unicode path, so using the path is as good
+        // as any other information. This could improve the situation with
+        // other archive managers too.
+        // This field is usually used without the utf8 flag, with a non
+        // unicode path in the header (winrar, winzip). This helps (a bit)
+        // with the messy Windows' default compressed folders feature but
+        // breaks on p7zip which doesn't seek the unicode path extra field.
+        // So for now, UTF-8 everywhere !
+        unicodePathExtraField =
+            // Version
+            decToHex(1, 1) +
+            // NameCRC32
+            decToHex(this.crc32(utfEncodedFileName), 4) +
+            // UnicodeName
+            utfEncodedFileName;
+
+        extraFields +=
+            // Info-ZIP Unicode Path Extra Field
+            "\x75\x70" +
+            // size
+            decToHex(unicodePathExtraField.length, 2) +
+            // content
+            unicodePathExtraField;
+    }
 
     var header = "";
 
@@ -1230,10 +1215,10 @@ var generateZipParts = function(name, file, compressedObject, offset) {
     // file name length
     header += decToHex(utfEncodedFileName.length, 2);
     // extra field length
-    header += "\x00\x00";
+    header += decToHex(extraFields.length, 2);
 
 
-    var fileRecord = signature.LOCAL_FILE_HEADER + header + utfEncodedFileName;
+    var fileRecord = signature.LOCAL_FILE_HEADER + header + utfEncodedFileName + extraFields;
 
     var dirRecord = signature.CENTRAL_FILE_HEADER +
     // version made by (00: DOS)
@@ -1251,7 +1236,9 @@ var generateZipParts = function(name, file, compressedObject, offset) {
     // relative offset of local header
     decToHex(offset, 4) +
     // file name
-    utfEncodedFileName;
+    utfEncodedFileName +
+    // extra field
+    extraFields;
 
 
     return {
@@ -1367,7 +1354,7 @@ var out = {
      */
     file: function(name, data, o) {
         if (arguments.length === 1) {
-            if (name instanceof RegExp) {
+            if (utils.isRegExp(name)) {
                 var regexp = name;
                 return this.filter(function(relativePath, file) {
                     return !file.options.dir && regexp.test(relativePath);
@@ -1396,7 +1383,7 @@ var out = {
             return this;
         }
 
-        if (arg instanceof RegExp) {
+        if (utils.isRegExp(arg)) {
             return this.filter(function(relativePath, file) {
                 return file.options.dir && arg.test(relativePath);
             });
@@ -1513,18 +1500,11 @@ var out = {
 
         // we have all the parts (and the total length)
         // time to create a writer !
-        switch (options.type.toLowerCase()) {
-        case "uint8array":
-        case "arraybuffer":
-        case "blob":
-        case "nodebuffer":
+        var typeName = options.type.toLowerCase();
+        if(typeName==="uint8array"||typeName==="arraybuffer"||typeName==="blob"||typeName==="nodebuffer") {
             writer = new Uint8ArrayWriter(localDirLength + centralDirLength + dirEnd.length);
-            break;
-        case "base64":
-        default:
-            // case "string" :
+        }else{
             writer = new StringWriter(localDirLength + centralDirLength + dirEnd.length);
-            break;
         }
 
         for (i = 0; i < zipData.length; i++) {
@@ -1541,22 +1521,21 @@ var out = {
 
 
 
-        switch (options.type.toLowerCase()) {
+        switch(options.type.toLowerCase()) {
             // case "zip is an Uint8Array"
-        case "uint8array":
-        case "arraybuffer":
-        case "nodebuffer":
-            return utils.transformTo(options.type.toLowerCase(), zip);
-        case "blob":
-            return utils.arrayBuffer2Blob(utils.transformTo("arraybuffer", zip));
-
+            case "uint8array" :
+            case "arraybuffer" :
+            case "nodebuffer" :
+               return utils.transformTo(options.type.toLowerCase(), zip);
+            case "blob" :
+               return utils.arrayBuffer2Blob(utils.transformTo("arraybuffer", zip));
             // case "zip is a string"
-        case "base64":
-            return (options.base64) ? base64.encode(zip) : zip;
-        default:
-            // case "string" :
-            return zip;
-        }
+            case "base64" :
+               return (options.base64) ? base64.encode(zip) : zip;
+            default : // case "string" :
+               return zip;
+         }
+      
     },
 
     /**
@@ -1643,12 +1622,12 @@ var out = {
         }
         var x = 0;
         var y = 0;
-        var byte = 0;
+        var b = 0;
 
         crc = crc ^ (-1);
         for (var i = 0, iTop = input.length; i < iTop; i++) {
-            byte = isArray ? input[i] : input.charCodeAt(i);
-            y = (crc ^ byte) & 0xFF;
+            b = isArray ? input[i] : input.charCodeAt(i);
+            y = (crc ^ b) & 0xFF;
             x = table[y];
             crc = (crc >>> 8) ^ x;
         }
@@ -1665,12 +1644,12 @@ var out = {
         // TextEncoder + Uint8Array to binary string is faster than checking every bytes on long strings.
         // http://jsperf.com/utf8encode-vs-textencoder
         // On short strings (file names for example), the TextEncoder API is (currently) slower.
-        if (support.uint8array && typeof TextEncoder === "function") {
-            var u8 = TextEncoder("utf-8").encode(string);
+        if (textEncoder) {
+            var u8 = textEncoder.encode(string);
             return utils.transformTo("string", u8);
         }
         if (support.nodebuffer) {
-            return utils.transformTo("string", new Buffer(string, "utf-8"));
+            return utils.transformTo("string", nodeBuffer(string, "utf-8"));
         }
 
         // array.join may be slower than string concatenation but generates less objects (less time spent garbage collecting).
@@ -1716,9 +1695,10 @@ var out = {
 
         // check if we can use the TextDecoder API
         // see http://encoding.spec.whatwg.org/#api
-        if (support.uint8array && typeof TextDecoder === "function") {
-            return TextDecoder("utf-8").decode(
-            utils.transformTo("uint8array", input));
+        if (textDecoder) {
+            return textDecoder.decode(
+                utils.transformTo("uint8array", input)
+            );
         }
         if (support.nodebuffer) {
             return utils.transformTo("nodebuffer", input).toString("utf-8");
@@ -1751,8 +1731,8 @@ var out = {
 };
 module.exports = out;
 
-});
-require.register("calvinmetcalf-jszip/lib/signature.js", function(exports, require, module){
+},{"./base64":6,"./compressedObject":7,"./compressions":8,"./defaults":10,"./nodeBuffer":112,"./signature":15,"./support":17,"./utils":19}],15:[function(require,module,exports){
+'use strict';
 exports.LOCAL_FILE_HEADER = "PK\x03\x04";
 exports.CENTRAL_FILE_HEADER = "PK\x01\x02";
 exports.CENTRAL_DIRECTORY_END = "PK\x05\x06";
@@ -1760,8 +1740,8 @@ exports.ZIP64_CENTRAL_DIRECTORY_LOCATOR = "PK\x06\x07";
 exports.ZIP64_CENTRAL_DIRECTORY_END = "PK\x06\x06";
 exports.DATA_DESCRIPTOR = "PK\x07\x08";
 
-});
-require.register("calvinmetcalf-jszip/lib/stringReader.js", function(exports, require, module){
+},{}],16:[function(require,module,exports){
+'use strict';
 var DataReader = require('./dataReader');
 var utils = require('./utils');
 
@@ -1797,14 +1777,16 @@ StringReader.prototype.readData = function(size) {
     return result;
 };
 module.exports = StringReader;
-});
-require.register("calvinmetcalf-jszip/lib/support.js", function(exports, require, module){
+
+},{"./dataReader":9,"./utils":19}],17:[function(require,module,exports){
+(function (process){
+'use strict';
 exports.base64 = true;
 exports.array = true;
 exports.string = true;
 exports.arraybuffer = typeof ArrayBuffer !== "undefined" && typeof Uint8Array !== "undefined";
-// contains true if JSZip can read/generate nodejs Buffer, false otherwise.
-exports.nodebuffer = typeof Buffer !== "undefined";
+// contains true if JSZip can read/generate nodejs Buffer, false otherwise, aka checks if we arn't in a browser.
+exports.nodebuffer = !process.browser;
 // contains true if JSZip can read/generate Uint8Array, false otherwise.
 exports.uint8array = typeof Uint8Array !== "undefined";
 
@@ -1820,8 +1802,8 @@ else {
     }
     catch (e) {
         try {
-            var b = window.BlobBuilder || window.WebKitBlobBuilder || window.MozBlobBuilder || window.MSBlobBuilder;
-            var builder = new b();
+            var Builder = window.BlobBuilder || window.WebKitBlobBuilder || window.MozBlobBuilder || window.MSBlobBuilder;
+            var builder = new Builder();
             builder.append(buffer);
             exports.blob = builder.getBlob('application/zip').size === 0;
         }
@@ -1831,8 +1813,9 @@ else {
     }
 }
 
-});
-require.register("calvinmetcalf-jszip/lib/uint8ArrayReader.js", function(exports, require, module){
+}).call(this,require('_process'))
+},{"_process":117}],18:[function(require,module,exports){
+'use strict';
 var DataReader = require('./dataReader');
 
 function Uint8ArrayReader(data) {
@@ -1875,10 +1858,12 @@ Uint8ArrayReader.prototype.readData = function(size) {
     return result;
 };
 module.exports = Uint8ArrayReader;
-});
-require.register("calvinmetcalf-jszip/lib/utils.js", function(exports, require, module){
+
+},{"./dataReader":9}],19:[function(require,module,exports){
+'use strict';
 var support = require('./support');
 var compressions = require('./compressions');
+var nodeBuffer = require('./nodeBuffer');
 /**
  * Convert a string to a "binary string" : a string containing only char codes between 0 and 255.
  * @param {string} str the string to transform.
@@ -1933,7 +1918,8 @@ exports.arrayBuffer2Blob = function(buffer) {
 
         try {
             // deprecated, browser only, old way
-            var builder = new(window.BlobBuilder || window.WebKitBlobBuilder || window.MozBlobBuilder || window.MSBlobBuilder)();
+            var Builder = window.BlobBuilder || window.WebKitBlobBuilder || window.MozBlobBuilder || window.MSBlobBuilder;
+            var builder = new Builder();
             builder.append(buffer);
             return builder.getBlob('application/zip');
         }
@@ -1953,7 +1939,7 @@ exports.arrayBuffer2Blob = function(buffer) {
  */
 function identity(input) {
     return input;
-};
+}
 
 /**
  * Fill in an array with a string.
@@ -1966,7 +1952,7 @@ function stringToArrayLike(str, array) {
         array[i] = str.charCodeAt(i) & 0xFF;
     }
     return array;
-};
+}
 
 /**
  * Transform an array-like object to a string.
@@ -1987,15 +1973,37 @@ function arrayLikeToString(array) {
     var result = [],
         len = array.length,
         type = exports.getTypeOf(array),
-        k = 0;
+        k = 0,
+        canUseApply = true;
+      try {
+         switch(type) {
+            case "uint8array":
+               String.fromCharCode.apply(null, new Uint8Array(0));
+               break;
+            case "nodebuffer":
+               String.fromCharCode.apply(null, nodeBuffer(0));
+               break;
+         }
+      } catch(e) {
+         canUseApply = false;
+      }
 
+      // no apply : slow and painful algorithm
+      // default browser on android 4.*
+      if (!canUseApply) {
+         var resultStr = "";
+         for(var i = 0; i < array.length;i++) {
+            resultStr += String.fromCharCode(array[i]);
+         }
+    return resultStr;
+    }
     while (k < len && chunk > 1) {
         try {
             if (type === "array" || type === "nodebuffer") {
-                result.push(String.fromCharCode.apply(null, array.slice(k, Math.max(k + chunk, len))));
+                result.push(String.fromCharCode.apply(null, array.slice(k, Math.min(k + chunk, len))));
             }
             else {
-                result.push(String.fromCharCode.apply(null, array.subarray(k, k + chunk)));
+                result.push(String.fromCharCode.apply(null, array.subarray(k, Math.min(k + chunk, len))));
             }
             k += chunk;
         }
@@ -2004,7 +2012,7 @@ function arrayLikeToString(array) {
         }
     }
     return result.join("");
-};
+}
 
 /**
  * Copy the data from an array-like to an other array-like.
@@ -2017,7 +2025,7 @@ function arrayLikeToArrayLike(arrayFrom, arrayTo) {
         arrayTo[i] = arrayFrom[i];
     }
     return arrayTo;
-};
+}
 
 // a matrix containing functions to transform everything into everything.
 var transform = {};
@@ -2035,7 +2043,7 @@ transform["string"] = {
         return stringToArrayLike(input, new Uint8Array(input.length));
     },
     "nodebuffer": function(input) {
-        return stringToArrayLike(input, new Buffer(input.length));
+        return stringToArrayLike(input, nodeBuffer(input.length));
     }
 };
 
@@ -2050,7 +2058,7 @@ transform["array"] = {
         return new Uint8Array(input);
     },
     "nodebuffer": function(input) {
-        return new Buffer(input);
+        return nodeBuffer(input);
     }
 };
 
@@ -2067,7 +2075,7 @@ transform["arraybuffer"] = {
         return new Uint8Array(input);
     },
     "nodebuffer": function(input) {
-        return new Buffer(new Uint8Array(input));
+        return nodeBuffer(new Uint8Array(input));
     }
 };
 
@@ -2082,7 +2090,7 @@ transform["uint8array"] = {
     },
     "uint8array": identity,
     "nodebuffer": function(input) {
-        return new Buffer(input);
+        return nodeBuffer(input);
     }
 };
 
@@ -2134,10 +2142,10 @@ exports.getTypeOf = function(input) {
     if (typeof input === "string") {
         return "string";
     }
-    if (input instanceof Array) {
+    if (Object.prototype.toString.call(input) === "[object Array]") {
         return "array";
     }
-    if (support.nodebuffer && Buffer.isBuffer(input)) {
+    if (support.nodebuffer && nodeBuffer.test(input)) {
         return "nodebuffer";
     }
     if (support.uint8array && input instanceof Uint8Array) {
@@ -2193,9 +2201,19 @@ exports.findCompression = function(compressionMethod) {
     }
     return null;
 };
+/**
+* Cross-window, cross-Node-context regular expression detection
+* @param  {Object}  object Anything
+* @return {Boolean}        true if the object is a regular expression,
+* false otherwise
+*/
+exports.isRegExp = function (object) {
+    return Object.prototype.toString.call(object) === "[object RegExp]";
+};
 
-});
-require.register("calvinmetcalf-jszip/lib/zipEntries.js", function(exports, require, module){
+
+},{"./compressions":8,"./nodeBuffer":112,"./support":17}],20:[function(require,module,exports){
+'use strict';
 var StringReader = require('./stringReader');
 var NodeBufferReader = require('./nodeBufferReader');
 var Uint8ArrayReader = require('./uint8ArrayReader');
@@ -2391,8 +2409,9 @@ ZipEntries.prototype = {
 };
 // }}} end of ZipEntries
 module.exports = ZipEntries;
-});
-require.register("calvinmetcalf-jszip/lib/zipEntry.js", function(exports, require, module){
+
+},{"./nodeBufferReader":112,"./signature":15,"./stringReader":16,"./support":17,"./uint8ArrayReader":18,"./utils":19,"./zipEntry":21}],21:[function(require,module,exports){
+'use strict';
 var StringReader = require('./stringReader');
 var utils = require('./utils');
 var CompressedObject = require('./compressedObject');
@@ -2440,7 +2459,7 @@ ZipEntry.prototype = {
             reader.setIndex(previousIndex);
 
             return compressedFileData;
-        }
+        };
     },
     /**
      * Prepare the function used to generate the uncompressed content from this ZipFile.
@@ -2462,7 +2481,7 @@ ZipEntry.prototype = {
             }
 
             return uncompressedFileData;
-        }
+        };
     },
     /**
      * Read the local part of a zip file and add the info in this object.
@@ -2610,1152 +2629,954 @@ ZipEntry.prototype = {
         if (this.useUTF8()) {
             this.fileName = jszipProto.utf8decode(this.fileName);
             this.fileComment = jszipProto.utf8decode(this.fileComment);
+        } else {
+            var upath = this.findExtraFieldUnicodePath();
+            if (upath !== null) {
+                this.fileName = upath;
+            }
         }
+    },
+
+    /**
+     * Find the unicode path declared in the extra field, if any.
+     * @return {String} the unicode path, null otherwise.
+     */
+    findExtraFieldUnicodePath: function() {
+        var upathField = this.extraFields[0x7075];
+        if (upathField) {
+            var extraReader = new StringReader(upathField.value);
+
+            // wrong version
+            if (extraReader.readInt(1) !== 1) {
+                return null;
+            }
+
+            // the crc of the filename changed, this field is out of date.
+            if (jszipProto.crc32(this.fileName) !== extraReader.readInt(4)) {
+                return null;
+            }
+
+            return jszipProto.utf8decode(extraReader.readString(upathField.length - 5));
+        }
+        return null;
     }
 };
 module.exports = ZipEntry;
 
-});
-require.register("calvinmetcalf-jszip/lib/flate/index.js", function(exports, require, module){
-var USE_TYPEDARRAY = (typeof Uint8Array !== 'undefined') && (typeof Uint16Array !== 'undefined') && (typeof Uint32Array !== 'undefined');
-exports.magic = "\x08\x00";
-exports.uncompress = require('./inflate');
-exports.uncompressInputType = USE_TYPEDARRAY ? "uint8array" : "array";
-exports.compress = require('./deflate');
-exports.compressInputType = USE_TYPEDARRAY ? "uint8array" : "array";
+},{"./compressedObject":7,"./object":14,"./stringReader":16,"./utils":19}],22:[function(require,module,exports){
+/** @license zlib.js 2012 - imaya [ https://github.com/imaya/zlib.js ] The MIT License */(function() {'use strict';var n=void 0,u=!0,aa=this;function ba(e,d){var c=e.split("."),f=aa;!(c[0]in f)&&f.execScript&&f.execScript("var "+c[0]);for(var a;c.length&&(a=c.shift());)!c.length&&d!==n?f[a]=d:f=f[a]?f[a]:f[a]={}};var C="undefined"!==typeof Uint8Array&&"undefined"!==typeof Uint16Array&&"undefined"!==typeof Uint32Array;function K(e,d){this.index="number"===typeof d?d:0;this.d=0;this.buffer=e instanceof(C?Uint8Array:Array)?e:new (C?Uint8Array:Array)(32768);if(2*this.buffer.length<=this.index)throw Error("invalid index");this.buffer.length<=this.index&&ca(this)}function ca(e){var d=e.buffer,c,f=d.length,a=new (C?Uint8Array:Array)(f<<1);if(C)a.set(d);else for(c=0;c<f;++c)a[c]=d[c];return e.buffer=a}
+K.prototype.a=function(e,d,c){var f=this.buffer,a=this.index,b=this.d,k=f[a],m;c&&1<d&&(e=8<d?(L[e&255]<<24|L[e>>>8&255]<<16|L[e>>>16&255]<<8|L[e>>>24&255])>>32-d:L[e]>>8-d);if(8>d+b)k=k<<d|e,b+=d;else for(m=0;m<d;++m)k=k<<1|e>>d-m-1&1,8===++b&&(b=0,f[a++]=L[k],k=0,a===f.length&&(f=ca(this)));f[a]=k;this.buffer=f;this.d=b;this.index=a};K.prototype.finish=function(){var e=this.buffer,d=this.index,c;0<this.d&&(e[d]<<=8-this.d,e[d]=L[e[d]],d++);C?c=e.subarray(0,d):(e.length=d,c=e);return c};
+var ga=new (C?Uint8Array:Array)(256),M;for(M=0;256>M;++M){for(var R=M,S=R,ha=7,R=R>>>1;R;R>>>=1)S<<=1,S|=R&1,--ha;ga[M]=(S<<ha&255)>>>0}var L=ga;function ja(e){this.buffer=new (C?Uint16Array:Array)(2*e);this.length=0}ja.prototype.getParent=function(e){return 2*((e-2)/4|0)};ja.prototype.push=function(e,d){var c,f,a=this.buffer,b;c=this.length;a[this.length++]=d;for(a[this.length++]=e;0<c;)if(f=this.getParent(c),a[c]>a[f])b=a[c],a[c]=a[f],a[f]=b,b=a[c+1],a[c+1]=a[f+1],a[f+1]=b,c=f;else break;return this.length};
+ja.prototype.pop=function(){var e,d,c=this.buffer,f,a,b;d=c[0];e=c[1];this.length-=2;c[0]=c[this.length];c[1]=c[this.length+1];for(b=0;;){a=2*b+2;if(a>=this.length)break;a+2<this.length&&c[a+2]>c[a]&&(a+=2);if(c[a]>c[b])f=c[b],c[b]=c[a],c[a]=f,f=c[b+1],c[b+1]=c[a+1],c[a+1]=f;else break;b=a}return{index:e,value:d,length:this.length}};function ka(e,d){this.e=ma;this.f=0;this.input=C&&e instanceof Array?new Uint8Array(e):e;this.c=0;d&&(d.lazy&&(this.f=d.lazy),"number"===typeof d.compressionType&&(this.e=d.compressionType),d.outputBuffer&&(this.b=C&&d.outputBuffer instanceof Array?new Uint8Array(d.outputBuffer):d.outputBuffer),"number"===typeof d.outputIndex&&(this.c=d.outputIndex));this.b||(this.b=new (C?Uint8Array:Array)(32768))}var ma=2,T=[],U;
+for(U=0;288>U;U++)switch(u){case 143>=U:T.push([U+48,8]);break;case 255>=U:T.push([U-144+400,9]);break;case 279>=U:T.push([U-256+0,7]);break;case 287>=U:T.push([U-280+192,8]);break;default:throw"invalid literal: "+U;}
+ka.prototype.h=function(){var e,d,c,f,a=this.input;switch(this.e){case 0:c=0;for(f=a.length;c<f;){d=C?a.subarray(c,c+65535):a.slice(c,c+65535);c+=d.length;var b=d,k=c===f,m=n,g=n,p=n,v=n,x=n,l=this.b,h=this.c;if(C){for(l=new Uint8Array(this.b.buffer);l.length<=h+b.length+5;)l=new Uint8Array(l.length<<1);l.set(this.b)}m=k?1:0;l[h++]=m|0;g=b.length;p=~g+65536&65535;l[h++]=g&255;l[h++]=g>>>8&255;l[h++]=p&255;l[h++]=p>>>8&255;if(C)l.set(b,h),h+=b.length,l=l.subarray(0,h);else{v=0;for(x=b.length;v<x;++v)l[h++]=
+b[v];l.length=h}this.c=h;this.b=l}break;case 1:var q=new K(C?new Uint8Array(this.b.buffer):this.b,this.c);q.a(1,1,u);q.a(1,2,u);var t=na(this,a),w,da,z;w=0;for(da=t.length;w<da;w++)if(z=t[w],K.prototype.a.apply(q,T[z]),256<z)q.a(t[++w],t[++w],u),q.a(t[++w],5),q.a(t[++w],t[++w],u);else if(256===z)break;this.b=q.finish();this.c=this.b.length;break;case ma:var B=new K(C?new Uint8Array(this.b.buffer):this.b,this.c),ra,J,N,O,P,Ia=[16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15],W,sa,X,ta,ea,ia=Array(19),
+ua,Q,fa,y,va;ra=ma;B.a(1,1,u);B.a(ra,2,u);J=na(this,a);W=oa(this.j,15);sa=pa(W);X=oa(this.i,7);ta=pa(X);for(N=286;257<N&&0===W[N-1];N--);for(O=30;1<O&&0===X[O-1];O--);var wa=N,xa=O,F=new (C?Uint32Array:Array)(wa+xa),r,G,s,Y,E=new (C?Uint32Array:Array)(316),D,A,H=new (C?Uint8Array:Array)(19);for(r=G=0;r<wa;r++)F[G++]=W[r];for(r=0;r<xa;r++)F[G++]=X[r];if(!C){r=0;for(Y=H.length;r<Y;++r)H[r]=0}r=D=0;for(Y=F.length;r<Y;r+=G){for(G=1;r+G<Y&&F[r+G]===F[r];++G);s=G;if(0===F[r])if(3>s)for(;0<s--;)E[D++]=0,
+H[0]++;else for(;0<s;)A=138>s?s:138,A>s-3&&A<s&&(A=s-3),10>=A?(E[D++]=17,E[D++]=A-3,H[17]++):(E[D++]=18,E[D++]=A-11,H[18]++),s-=A;else if(E[D++]=F[r],H[F[r]]++,s--,3>s)for(;0<s--;)E[D++]=F[r],H[F[r]]++;else for(;0<s;)A=6>s?s:6,A>s-3&&A<s&&(A=s-3),E[D++]=16,E[D++]=A-3,H[16]++,s-=A}e=C?E.subarray(0,D):E.slice(0,D);ea=oa(H,7);for(y=0;19>y;y++)ia[y]=ea[Ia[y]];for(P=19;4<P&&0===ia[P-1];P--);ua=pa(ea);B.a(N-257,5,u);B.a(O-1,5,u);B.a(P-4,4,u);for(y=0;y<P;y++)B.a(ia[y],3,u);y=0;for(va=e.length;y<va;y++)if(Q=
+e[y],B.a(ua[Q],ea[Q],u),16<=Q){y++;switch(Q){case 16:fa=2;break;case 17:fa=3;break;case 18:fa=7;break;default:throw"invalid code: "+Q;}B.a(e[y],fa,u)}var ya=[sa,W],za=[ta,X],I,Aa,Z,la,Ba,Ca,Da,Ea;Ba=ya[0];Ca=ya[1];Da=za[0];Ea=za[1];I=0;for(Aa=J.length;I<Aa;++I)if(Z=J[I],B.a(Ba[Z],Ca[Z],u),256<Z)B.a(J[++I],J[++I],u),la=J[++I],B.a(Da[la],Ea[la],u),B.a(J[++I],J[++I],u);else if(256===Z)break;this.b=B.finish();this.c=this.b.length;break;default:throw"invalid compression type";}return this.b};
+function qa(e,d){this.length=e;this.g=d}
+var Fa=function(){function e(a){switch(u){case 3===a:return[257,a-3,0];case 4===a:return[258,a-4,0];case 5===a:return[259,a-5,0];case 6===a:return[260,a-6,0];case 7===a:return[261,a-7,0];case 8===a:return[262,a-8,0];case 9===a:return[263,a-9,0];case 10===a:return[264,a-10,0];case 12>=a:return[265,a-11,1];case 14>=a:return[266,a-13,1];case 16>=a:return[267,a-15,1];case 18>=a:return[268,a-17,1];case 22>=a:return[269,a-19,2];case 26>=a:return[270,a-23,2];case 30>=a:return[271,a-27,2];case 34>=a:return[272,
+a-31,2];case 42>=a:return[273,a-35,3];case 50>=a:return[274,a-43,3];case 58>=a:return[275,a-51,3];case 66>=a:return[276,a-59,3];case 82>=a:return[277,a-67,4];case 98>=a:return[278,a-83,4];case 114>=a:return[279,a-99,4];case 130>=a:return[280,a-115,4];case 162>=a:return[281,a-131,5];case 194>=a:return[282,a-163,5];case 226>=a:return[283,a-195,5];case 257>=a:return[284,a-227,5];case 258===a:return[285,a-258,0];default:throw"invalid length: "+a;}}var d=[],c,f;for(c=3;258>=c;c++)f=e(c),d[c]=f[2]<<24|
+f[1]<<16|f[0];return d}(),Ga=C?new Uint32Array(Fa):Fa;
+function na(e,d){function c(a,c){var b=a.g,d=[],f=0,e;e=Ga[a.length];d[f++]=e&65535;d[f++]=e>>16&255;d[f++]=e>>24;var g;switch(u){case 1===b:g=[0,b-1,0];break;case 2===b:g=[1,b-2,0];break;case 3===b:g=[2,b-3,0];break;case 4===b:g=[3,b-4,0];break;case 6>=b:g=[4,b-5,1];break;case 8>=b:g=[5,b-7,1];break;case 12>=b:g=[6,b-9,2];break;case 16>=b:g=[7,b-13,2];break;case 24>=b:g=[8,b-17,3];break;case 32>=b:g=[9,b-25,3];break;case 48>=b:g=[10,b-33,4];break;case 64>=b:g=[11,b-49,4];break;case 96>=b:g=[12,b-
+65,5];break;case 128>=b:g=[13,b-97,5];break;case 192>=b:g=[14,b-129,6];break;case 256>=b:g=[15,b-193,6];break;case 384>=b:g=[16,b-257,7];break;case 512>=b:g=[17,b-385,7];break;case 768>=b:g=[18,b-513,8];break;case 1024>=b:g=[19,b-769,8];break;case 1536>=b:g=[20,b-1025,9];break;case 2048>=b:g=[21,b-1537,9];break;case 3072>=b:g=[22,b-2049,10];break;case 4096>=b:g=[23,b-3073,10];break;case 6144>=b:g=[24,b-4097,11];break;case 8192>=b:g=[25,b-6145,11];break;case 12288>=b:g=[26,b-8193,12];break;case 16384>=
+b:g=[27,b-12289,12];break;case 24576>=b:g=[28,b-16385,13];break;case 32768>=b:g=[29,b-24577,13];break;default:throw"invalid distance";}e=g;d[f++]=e[0];d[f++]=e[1];d[f++]=e[2];var k,m;k=0;for(m=d.length;k<m;++k)l[h++]=d[k];t[d[0]]++;w[d[3]]++;q=a.length+c-1;x=null}var f,a,b,k,m,g={},p,v,x,l=C?new Uint16Array(2*d.length):[],h=0,q=0,t=new (C?Uint32Array:Array)(286),w=new (C?Uint32Array:Array)(30),da=e.f,z;if(!C){for(b=0;285>=b;)t[b++]=0;for(b=0;29>=b;)w[b++]=0}t[256]=1;f=0;for(a=d.length;f<a;++f){b=
+m=0;for(k=3;b<k&&f+b!==a;++b)m=m<<8|d[f+b];g[m]===n&&(g[m]=[]);p=g[m];if(!(0<q--)){for(;0<p.length&&32768<f-p[0];)p.shift();if(f+3>=a){x&&c(x,-1);b=0;for(k=a-f;b<k;++b)z=d[f+b],l[h++]=z,++t[z];break}0<p.length?(v=Ha(d,f,p),x?x.length<v.length?(z=d[f-1],l[h++]=z,++t[z],c(v,0)):c(x,-1):v.length<da?x=v:c(v,0)):x?c(x,-1):(z=d[f],l[h++]=z,++t[z])}p.push(f)}l[h++]=256;t[256]++;e.j=t;e.i=w;return C?l.subarray(0,h):l}
+function Ha(e,d,c){var f,a,b=0,k,m,g,p,v=e.length;m=0;p=c.length;a:for(;m<p;m++){f=c[p-m-1];k=3;if(3<b){for(g=b;3<g;g--)if(e[f+g-1]!==e[d+g-1])continue a;k=b}for(;258>k&&d+k<v&&e[f+k]===e[d+k];)++k;k>b&&(a=f,b=k);if(258===k)break}return new qa(b,d-a)}
+function oa(e,d){var c=e.length,f=new ja(572),a=new (C?Uint8Array:Array)(c),b,k,m,g,p;if(!C)for(g=0;g<c;g++)a[g]=0;for(g=0;g<c;++g)0<e[g]&&f.push(g,e[g]);b=Array(f.length/2);k=new (C?Uint32Array:Array)(f.length/2);if(1===b.length)return a[f.pop().index]=1,a;g=0;for(p=f.length/2;g<p;++g)b[g]=f.pop(),k[g]=b[g].value;m=Ja(k,k.length,d);g=0;for(p=b.length;g<p;++g)a[b[g].index]=m[g];return a}
+function Ja(e,d,c){function f(a){var b=g[a][p[a]];b===d?(f(a+1),f(a+1)):--k[b];++p[a]}var a=new (C?Uint16Array:Array)(c),b=new (C?Uint8Array:Array)(c),k=new (C?Uint8Array:Array)(d),m=Array(c),g=Array(c),p=Array(c),v=(1<<c)-d,x=1<<c-1,l,h,q,t,w;a[c-1]=d;for(h=0;h<c;++h)v<x?b[h]=0:(b[h]=1,v-=x),v<<=1,a[c-2-h]=(a[c-1-h]/2|0)+d;a[0]=b[0];m[0]=Array(a[0]);g[0]=Array(a[0]);for(h=1;h<c;++h)a[h]>2*a[h-1]+b[h]&&(a[h]=2*a[h-1]+b[h]),m[h]=Array(a[h]),g[h]=Array(a[h]);for(l=0;l<d;++l)k[l]=c;for(q=0;q<a[c-1];++q)m[c-
+1][q]=e[q],g[c-1][q]=q;for(l=0;l<c;++l)p[l]=0;1===b[c-1]&&(--k[0],++p[c-1]);for(h=c-2;0<=h;--h){t=l=0;w=p[h+1];for(q=0;q<a[h];q++)t=m[h+1][w]+m[h+1][w+1],t>e[l]?(m[h][q]=t,g[h][q]=d,w+=2):(m[h][q]=e[l],g[h][q]=l,++l);p[h]=0;1===b[h]&&f(h)}return k}
+function pa(e){var d=new (C?Uint16Array:Array)(e.length),c=[],f=[],a=0,b,k,m,g;b=0;for(k=e.length;b<k;b++)c[e[b]]=(c[e[b]]|0)+1;b=1;for(k=16;b<=k;b++)f[b]=a,a+=c[b]|0,a<<=1;b=0;for(k=e.length;b<k;b++){a=f[e[b]];f[e[b]]+=1;m=d[b]=0;for(g=e[b];m<g;m++)d[b]=d[b]<<1|a&1,a>>>=1}return d};ba("Zlib.RawDeflate",ka);ba("Zlib.RawDeflate.prototype.compress",ka.prototype.h);var Ka={NONE:0,FIXED:1,DYNAMIC:ma},V,La,$,Ma;if(Object.keys)V=Object.keys(Ka);else for(La in V=[],$=0,Ka)V[$++]=La;$=0;for(Ma=V.length;$<Ma;++$)La=V[$],ba("Zlib.RawDeflate.CompressionType."+La,Ka[La]);}).call(this); //@ sourceMappingURL=rawdeflate.min.js.map
 
-});
-require.register("calvinmetcalf-jszip/lib/flate/deflate.js", function(exports, require, module){
-var context = {};
-(function() {
+},{}],23:[function(require,module,exports){
+/** @license zlib.js 2012 - imaya [ https://github.com/imaya/zlib.js ] The MIT License */(function() {'use strict';var l=void 0,p=this;function q(c,d){var a=c.split("."),b=p;!(a[0]in b)&&b.execScript&&b.execScript("var "+a[0]);for(var e;a.length&&(e=a.shift());)!a.length&&d!==l?b[e]=d:b=b[e]?b[e]:b[e]={}};var r="undefined"!==typeof Uint8Array&&"undefined"!==typeof Uint16Array&&"undefined"!==typeof Uint32Array;function u(c){var d=c.length,a=0,b=Number.POSITIVE_INFINITY,e,f,g,h,k,m,s,n,t;for(n=0;n<d;++n)c[n]>a&&(a=c[n]),c[n]<b&&(b=c[n]);e=1<<a;f=new (r?Uint32Array:Array)(e);g=1;h=0;for(k=2;g<=a;){for(n=0;n<d;++n)if(c[n]===g){m=0;s=h;for(t=0;t<g;++t)m=m<<1|s&1,s>>=1;for(t=m;t<e;t+=k)f[t]=g<<16|n;++h}++g;h<<=1;k<<=1}return[f,a,b]};function v(c,d){this.g=[];this.h=32768;this.c=this.f=this.d=this.k=0;this.input=r?new Uint8Array(c):c;this.l=!1;this.i=w;this.p=!1;if(d||!(d={}))d.index&&(this.d=d.index),d.bufferSize&&(this.h=d.bufferSize),d.bufferType&&(this.i=d.bufferType),d.resize&&(this.p=d.resize);switch(this.i){case x:this.a=32768;this.b=new (r?Uint8Array:Array)(32768+this.h+258);break;case w:this.a=0;this.b=new (r?Uint8Array:Array)(this.h);this.e=this.u;this.m=this.r;this.j=this.s;break;default:throw Error("invalid inflate mode");
+}}var x=0,w=1;
+v.prototype.t=function(){for(;!this.l;){var c=y(this,3);c&1&&(this.l=!0);c>>>=1;switch(c){case 0:var d=this.input,a=this.d,b=this.b,e=this.a,f=l,g=l,h=l,k=b.length,m=l;this.c=this.f=0;f=d[a++];if(f===l)throw Error("invalid uncompressed block header: LEN (first byte)");g=f;f=d[a++];if(f===l)throw Error("invalid uncompressed block header: LEN (second byte)");g|=f<<8;f=d[a++];if(f===l)throw Error("invalid uncompressed block header: NLEN (first byte)");h=f;f=d[a++];if(f===l)throw Error("invalid uncompressed block header: NLEN (second byte)");h|=
+f<<8;if(g===~h)throw Error("invalid uncompressed block header: length verify");if(a+g>d.length)throw Error("input buffer is broken");switch(this.i){case x:for(;e+g>b.length;){m=k-e;g-=m;if(r)b.set(d.subarray(a,a+m),e),e+=m,a+=m;else for(;m--;)b[e++]=d[a++];this.a=e;b=this.e();e=this.a}break;case w:for(;e+g>b.length;)b=this.e({o:2});break;default:throw Error("invalid inflate mode");}if(r)b.set(d.subarray(a,a+g),e),e+=g,a+=g;else for(;g--;)b[e++]=d[a++];this.d=a;this.a=e;this.b=b;break;case 1:this.j(z,
+A);break;case 2:B(this);break;default:throw Error("unknown BTYPE: "+c);}}return this.m()};
+var C=[16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15],D=r?new Uint16Array(C):C,E=[3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258,258,258],F=r?new Uint16Array(E):E,G=[0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0,0,0],H=r?new Uint8Array(G):G,I=[1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577],J=r?new Uint16Array(I):I,K=[0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,
+13],L=r?new Uint8Array(K):K,M=new (r?Uint8Array:Array)(288),N,O;N=0;for(O=M.length;N<O;++N)M[N]=143>=N?8:255>=N?9:279>=N?7:8;var z=u(M),P=new (r?Uint8Array:Array)(30),Q,R;Q=0;for(R=P.length;Q<R;++Q)P[Q]=5;var A=u(P);function y(c,d){for(var a=c.f,b=c.c,e=c.input,f=c.d,g;b<d;){g=e[f++];if(g===l)throw Error("input buffer is broken");a|=g<<b;b+=8}g=a&(1<<d)-1;c.f=a>>>d;c.c=b-d;c.d=f;return g}
+function S(c,d){for(var a=c.f,b=c.c,e=c.input,f=c.d,g=d[0],h=d[1],k,m,s;b<h;){k=e[f++];if(k===l)break;a|=k<<b;b+=8}m=g[a&(1<<h)-1];s=m>>>16;c.f=a>>s;c.c=b-s;c.d=f;return m&65535}
+function B(c){function d(a,c,b){var d,f,e,g;for(g=0;g<a;)switch(d=S(this,c),d){case 16:for(e=3+y(this,2);e--;)b[g++]=f;break;case 17:for(e=3+y(this,3);e--;)b[g++]=0;f=0;break;case 18:for(e=11+y(this,7);e--;)b[g++]=0;f=0;break;default:f=b[g++]=d}return b}var a=y(c,5)+257,b=y(c,5)+1,e=y(c,4)+4,f=new (r?Uint8Array:Array)(D.length),g,h,k,m;for(m=0;m<e;++m)f[D[m]]=y(c,3);g=u(f);h=new (r?Uint8Array:Array)(a);k=new (r?Uint8Array:Array)(b);c.j(u(d.call(c,a,g,h)),u(d.call(c,b,g,k)))}
+v.prototype.j=function(c,d){var a=this.b,b=this.a;this.n=c;for(var e=a.length-258,f,g,h,k;256!==(f=S(this,c));)if(256>f)b>=e&&(this.a=b,a=this.e(),b=this.a),a[b++]=f;else{g=f-257;k=F[g];0<H[g]&&(k+=y(this,H[g]));f=S(this,d);h=J[f];0<L[f]&&(h+=y(this,L[f]));b>=e&&(this.a=b,a=this.e(),b=this.a);for(;k--;)a[b]=a[b++-h]}for(;8<=this.c;)this.c-=8,this.d--;this.a=b};
+v.prototype.s=function(c,d){var a=this.b,b=this.a;this.n=c;for(var e=a.length,f,g,h,k;256!==(f=S(this,c));)if(256>f)b>=e&&(a=this.e(),e=a.length),a[b++]=f;else{g=f-257;k=F[g];0<H[g]&&(k+=y(this,H[g]));f=S(this,d);h=J[f];0<L[f]&&(h+=y(this,L[f]));b+k>e&&(a=this.e(),e=a.length);for(;k--;)a[b]=a[b++-h]}for(;8<=this.c;)this.c-=8,this.d--;this.a=b};
+v.prototype.e=function(){var c=new (r?Uint8Array:Array)(this.a-32768),d=this.a-32768,a,b,e=this.b;if(r)c.set(e.subarray(32768,c.length));else{a=0;for(b=c.length;a<b;++a)c[a]=e[a+32768]}this.g.push(c);this.k+=c.length;if(r)e.set(e.subarray(d,d+32768));else for(a=0;32768>a;++a)e[a]=e[d+a];this.a=32768;return e};
+v.prototype.u=function(c){var d,a=this.input.length/this.d+1|0,b,e,f,g=this.input,h=this.b;c&&("number"===typeof c.o&&(a=c.o),"number"===typeof c.q&&(a+=c.q));2>a?(b=(g.length-this.d)/this.n[2],f=258*(b/2)|0,e=f<h.length?h.length+f:h.length<<1):e=h.length*a;r?(d=new Uint8Array(e),d.set(h)):d=h;return this.b=d};
+v.prototype.m=function(){var c=0,d=this.b,a=this.g,b,e=new (r?Uint8Array:Array)(this.k+(this.a-32768)),f,g,h,k;if(0===a.length)return r?this.b.subarray(32768,this.a):this.b.slice(32768,this.a);f=0;for(g=a.length;f<g;++f){b=a[f];h=0;for(k=b.length;h<k;++h)e[c++]=b[h]}f=32768;for(g=this.a;f<g;++f)e[c++]=d[f];this.g=[];return this.buffer=e};
+v.prototype.r=function(){var c,d=this.a;r?this.p?(c=new Uint8Array(d),c.set(this.b.subarray(0,d))):c=this.b.subarray(0,d):(this.b.length>d&&(this.b.length=d),c=this.b);return this.buffer=c};q("Zlib.RawInflate",v);q("Zlib.RawInflate.prototype.decompress",v.prototype.t);var T={ADAPTIVE:w,BLOCK:x},U,V,W,X;if(Object.keys)U=Object.keys(T);else for(V in U=[],W=0,T)U[W++]=V;W=0;for(X=U.length;W<X;++W)V=U[W],q("Zlib.RawInflate.BufferType."+V,T[V]);}).call(this); //@ sourceMappingURL=rawinflate.min.js.map
 
-    // https://github.com/imaya/zlib.js
-    // tag 0.1.6
-    // file bin/deflate.min.js
+},{}],24:[function(require,module,exports){
+'use strict';
 
-    /** @license zlib.js 2012 - imaya [ https://github.com/imaya/zlib.js ] The MIT License */
-    (function() {
-        'use strict';
-        var n = void 0,
-            u = !0,
-            aa = this;
+module.exports = INTERNAL;
 
-        function ba(e, d) {
-            var c = e.split("."),
-                f = aa;
-            !(c[0] in f) && f.execScript && f.execScript("var " + c[0]);
-            for (var a; c.length && (a = c.shift());)!c.length && d !== n ? f[a] = d : f = f[a] ? f[a] : f[a] = {}
-        };
-        var C = "undefined" !== typeof Uint8Array && "undefined" !== typeof Uint16Array && "undefined" !== typeof Uint32Array;
+function INTERNAL() {}
+},{}],25:[function(require,module,exports){
+'use strict';
+var Promise = require('./promise');
+var reject = require('./reject');
+var resolve = require('./resolve');
+var INTERNAL = require('./INTERNAL');
+var handlers = require('./handlers');
+module.exports = all;
+function all(iterable) {
+  if (Object.prototype.toString.call(iterable) !== '[object Array]') {
+    return reject(new TypeError('must be an array'));
+  }
 
-        function K(e, d) {
-            this.index = "number" === typeof d ? d : 0;
-            this.d = 0;
-            this.buffer = e instanceof(C ? Uint8Array : Array) ? e : new(C ? Uint8Array : Array)(32768);
-            if (2 * this.buffer.length <= this.index) throw Error("invalid index");
-            this.buffer.length <= this.index && ca(this)
-        }
-        function ca(e) {
-            var d = e.buffer,
-                c, f = d.length,
-                a = new(C ? Uint8Array : Array)(f << 1);
-            if (C) a.set(d);
-            else for (c = 0; c < f; ++c) a[c] = d[c];
-            return e.buffer = a
-        }
-        K.prototype.a = function(e, d, c) {
-            var f = this.buffer,
-                a = this.index,
-                b = this.d,
-                k = f[a],
-                m;
-            c && 1 < d && (e = 8 < d ? (L[e & 255] << 24 | L[e >>> 8 & 255] << 16 | L[e >>> 16 & 255] << 8 | L[e >>> 24 & 255]) >> 32 - d : L[e] >> 8 - d);
-            if (8 > d + b) k = k << d | e, b += d;
-            else for (m = 0; m < d; ++m) k = k << 1 | e >> d - m - 1 & 1, 8 === ++b && (b = 0, f[a++] = L[k], k = 0, a === f.length && (f = ca(this)));
-            f[a] = k;
-            this.buffer = f;
-            this.d = b;
-            this.index = a
-        };
-        K.prototype.finish = function() {
-            var e = this.buffer,
-                d = this.index,
-                c;
-            0 < this.d && (e[d] <<= 8 - this.d, e[d] = L[e[d]], d++);
-            C ? c = e.subarray(0, d) : (e.length = d, c = e);
-            return c
-        };
-        var ga = new(C ? Uint8Array : Array)(256),
-            M;
-        for (M = 0; 256 > M; ++M) {
-            for (var R = M, S = R, ha = 7, R = R >>> 1; R; R >>>= 1) S <<= 1, S |= R & 1, --ha;
-            ga[M] = (S << ha & 255) >>> 0
-        }
-        var L = ga;
+  var len = iterable.length;
+  var called = false;
+  if (!len) {
+    return resolve([]);
+  }
 
-        function ja(e) {
-            this.buffer = new(C ? Uint16Array : Array)(2 * e);
-            this.length = 0
-        }
-        ja.prototype.getParent = function(e) {
-            return 2 * ((e - 2) / 4 | 0)
-        };
-        ja.prototype.push = function(e, d) {
-            var c, f, a = this.buffer,
-                b;
-            c = this.length;
-            a[this.length++] = d;
-            for (a[this.length++] = e; 0 < c;) if (f = this.getParent(c), a[c] > a[f]) b = a[c], a[c] = a[f], a[f] = b, b = a[c + 1], a[c + 1] = a[f + 1], a[f + 1] = b, c = f;
-            else break;
-            return this.length
-        };
-        ja.prototype.pop = function() {
-            var e, d, c = this.buffer,
-                f, a, b;
-            d = c[0];
-            e = c[1];
-            this.length -= 2;
-            c[0] = c[this.length];
-            c[1] = c[this.length + 1];
-            for (b = 0;;) {
-                a = 2 * b + 2;
-                if (a >= this.length) break;
-                a + 2 < this.length && c[a + 2] > c[a] && (a += 2);
-                if (c[a] > c[b]) f = c[b], c[b] = c[a], c[a] = f, f = c[b + 1], c[b + 1] = c[a + 1], c[a + 1] = f;
-                else break;
-                b = a
-            }
-            return {
-                index: e,
-                value: d,
-                length: this.length
-            }
-        };
+  var values = new Array(len);
+  var resolved = 0;
+  var i = -1;
+  var promise = new Promise(INTERNAL);
+  
+  while (++i < len) {
+    allResolver(iterable[i], i);
+  }
+  return promise;
+  function allResolver(value, i) {
+    resolve(value).then(resolveFromAll, function (error) {
+      if (!called) {
+        called = true;
+        handlers.reject(promise, error);
+      }
+    });
+    function resolveFromAll(outValue) {
+      values[i] = outValue;
+      if (++resolved === len & !called) {
+        called = true;
+        handlers.resolve(promise, values);
+      }
+    }
+  }
+}
+},{"./INTERNAL":24,"./handlers":26,"./promise":28,"./reject":31,"./resolve":32}],26:[function(require,module,exports){
+'use strict';
+var tryCatch = require('./tryCatch');
+var resolveThenable = require('./resolveThenable');
+var states = require('./states');
 
-        function ka(e, d) {
-            this.e = ma;
-            this.f = 0;
-            this.input = C && e instanceof Array ? new Uint8Array(e) : e;
-            this.c = 0;
-            d && (d.lazy && (this.f = d.lazy), "number" === typeof d.compressionType && (this.e = d.compressionType), d.outputBuffer && (this.b = C && d.outputBuffer instanceof Array ? new Uint8Array(d.outputBuffer) : d.outputBuffer), "number" === typeof d.outputIndex && (this.c = d.outputIndex));
-            this.b || (this.b = new(C ? Uint8Array : Array)(32768))
-        }
-        var ma = 2,
-            T = [],
-            U;
-        for (U = 0; 288 > U; U++) switch (u) {
-        case 143 >= U:
-            T.push([U + 48, 8]);
-            break;
-        case 255 >= U:
-            T.push([U - 144 + 400, 9]);
-            break;
-        case 279 >= U:
-            T.push([U - 256 + 0, 7]);
-            break;
-        case 287 >= U:
-            T.push([U - 280 + 192, 8]);
-            break;
-        default:
-            throw "invalid literal: " + U;
-        }
-        ka.prototype.h = function() {
-            var e, d, c, f, a = this.input;
-            switch (this.e) {
-            case 0:
-                c = 0;
-                for (f = a.length; c < f;) {
-                    d = C ? a.subarray(c, c + 65535) : a.slice(c, c + 65535);
-                    c += d.length;
-                    var b = d,
-                        k = c === f,
-                        m = n,
-                        g = n,
-                        p = n,
-                        v = n,
-                        x = n,
-                        l = this.b,
-                        h = this.c;
-                    if (C) {
-                        for (l = new Uint8Array(this.b.buffer); l.length <= h + b.length + 5;) l = new Uint8Array(l.length << 1);
-                        l.set(this.b)
-                    }
-                    m = k ? 1 : 0;
-                    l[h++] = m | 0;
-                    g = b.length;
-                    p = ~g + 65536 & 65535;
-                    l[h++] = g & 255;
-                    l[h++] = g >>> 8 & 255;
-                    l[h++] = p & 255;
-                    l[h++] = p >>> 8 & 255;
-                    if (C) l.set(b, h), h += b.length, l = l.subarray(0, h);
-                    else {
-                        v = 0;
-                        for (x = b.length; v < x; ++v) l[h++] = b[v];
-                        l.length = h
-                    }
-                    this.c = h;
-                    this.b = l
-                }
-                break;
-            case 1:
-                var q = new K(C ? new Uint8Array(this.b.buffer) : this.b, this.c);
-                q.a(1, 1, u);
-                q.a(1, 2, u);
-                var t = na(this, a),
-                    w, da, z;
-                w = 0;
-                for (da = t.length; w < da; w++) if (z = t[w], K.prototype.a.apply(q, T[z]), 256 < z) q.a(t[++w], t[++w], u), q.a(t[++w], 5), q.a(t[++w], t[++w], u);
-                else if (256 === z) break;
-                this.b = q.finish();
-                this.c = this.b.length;
-                break;
-            case ma:
-                var B = new K(C ? new Uint8Array(this.b.buffer) : this.b, this.c),
-                    ra, J, N, O, P, Ia = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15],
-                    W, sa, X, ta, ea, ia = Array(19),
-                    ua, Q, fa, y, va;
-                ra = ma;
-                B.a(1, 1, u);
-                B.a(ra, 2, u);
-                J = na(this, a);
-                W = oa(this.j, 15);
-                sa = pa(W);
-                X = oa(this.i, 7);
-                ta = pa(X);
-                for (N = 286; 257 < N && 0 === W[N - 1]; N--);
-                for (O = 30; 1 < O && 0 === X[O - 1]; O--);
-                var wa = N,
-                    xa = O,
-                    F = new(C ? Uint32Array : Array)(wa + xa),
-                    r, G, s, Y, E = new(C ? Uint32Array : Array)(316),
-                    D, A, H = new(C ? Uint8Array : Array)(19);
-                for (r = G = 0; r < wa; r++) F[G++] = W[r];
-                for (r = 0; r < xa; r++) F[G++] = X[r];
-                if (!C) {
-                    r = 0;
-                    for (Y = H.length; r < Y; ++r) H[r] = 0
-                }
-                r = D = 0;
-                for (Y = F.length; r < Y; r += G) {
-                    for (G = 1; r + G < Y && F[r + G] === F[r]; ++G);
-                    s = G;
-                    if (0 === F[r]) if (3 > s) for (; 0 < s--;) E[D++] = 0,
-                    H[0]++;
-                    else for (; 0 < s;) A = 138 > s ? s : 138, A > s - 3 && A < s && (A = s - 3), 10 >= A ? (E[D++] = 17, E[D++] = A - 3, H[17]++) : (E[D++] = 18, E[D++] = A - 11, H[18]++), s -= A;
-                    else if (E[D++] = F[r], H[F[r]]++, s--, 3 > s) for (; 0 < s--;) E[D++] = F[r], H[F[r]]++;
-                    else for (; 0 < s;) A = 6 > s ? s : 6, A > s - 3 && A < s && (A = s - 3), E[D++] = 16, E[D++] = A - 3, H[16]++, s -= A
-                }
-                e = C ? E.subarray(0, D) : E.slice(0, D);
-                ea = oa(H, 7);
-                for (y = 0; 19 > y; y++) ia[y] = ea[Ia[y]];
-                for (P = 19; 4 < P && 0 === ia[P - 1]; P--);
-                ua = pa(ea);
-                B.a(N - 257, 5, u);
-                B.a(O - 1, 5, u);
-                B.a(P - 4, 4, u);
-                for (y = 0; y < P; y++) B.a(ia[y], 3, u);
-                y = 0;
-                for (va = e.length; y < va; y++) if (Q = e[y], B.a(ua[Q], ea[Q], u), 16 <= Q) {
-                    y++;
-                    switch (Q) {
-                    case 16:
-                        fa = 2;
-                        break;
-                    case 17:
-                        fa = 3;
-                        break;
-                    case 18:
-                        fa = 7;
-                        break;
-                    default:
-                        throw "invalid code: " + Q;
-                    }
-                    B.a(e[y], fa, u)
-                }
-                var ya = [sa, W],
-                    za = [ta, X],
-                    I, Aa, Z, la, Ba, Ca, Da, Ea;
-                Ba = ya[0];
-                Ca = ya[1];
-                Da = za[0];
-                Ea = za[1];
-                I = 0;
-                for (Aa = J.length; I < Aa; ++I) if (Z = J[I], B.a(Ba[Z], Ca[Z], u), 256 < Z) B.a(J[++I], J[++I], u), la = J[++I], B.a(Da[la], Ea[la], u), B.a(J[++I], J[++I], u);
-                else if (256 === Z) break;
-                this.b = B.finish();
-                this.c = this.b.length;
-                break;
-            default:
-                throw "invalid compression type";
-            }
-            return this.b
-        };
+exports.resolve = function (self, value) {
+  var result = tryCatch(getThen, value);
+  if (result.status === 'error') {
+    return exports.reject(self, result.value);
+  }
+  var thenable = result.value;
 
-        function qa(e, d) {
-            this.length = e;
-            this.g = d
-        }
-        var Fa = function() {
-            function e(a) {
-                switch (u) {
-                case 3 === a:
-                    return [257, a - 3, 0];
-                case 4 === a:
-                    return [258, a - 4, 0];
-                case 5 === a:
-                    return [259, a - 5, 0];
-                case 6 === a:
-                    return [260, a - 6, 0];
-                case 7 === a:
-                    return [261, a - 7, 0];
-                case 8 === a:
-                    return [262, a - 8, 0];
-                case 9 === a:
-                    return [263, a - 9, 0];
-                case 10 === a:
-                    return [264, a - 10, 0];
-                case 12 >= a:
-                    return [265, a - 11, 1];
-                case 14 >= a:
-                    return [266, a - 13, 1];
-                case 16 >= a:
-                    return [267, a - 15, 1];
-                case 18 >= a:
-                    return [268, a - 17, 1];
-                case 22 >= a:
-                    return [269, a - 19, 2];
-                case 26 >= a:
-                    return [270, a - 23, 2];
-                case 30 >= a:
-                    return [271, a - 27, 2];
-                case 34 >= a:
-                    return [272,
-                    a - 31, 2];
-                case 42 >= a:
-                    return [273, a - 35, 3];
-                case 50 >= a:
-                    return [274, a - 43, 3];
-                case 58 >= a:
-                    return [275, a - 51, 3];
-                case 66 >= a:
-                    return [276, a - 59, 3];
-                case 82 >= a:
-                    return [277, a - 67, 4];
-                case 98 >= a:
-                    return [278, a - 83, 4];
-                case 114 >= a:
-                    return [279, a - 99, 4];
-                case 130 >= a:
-                    return [280, a - 115, 4];
-                case 162 >= a:
-                    return [281, a - 131, 5];
-                case 194 >= a:
-                    return [282, a - 163, 5];
-                case 226 >= a:
-                    return [283, a - 195, 5];
-                case 257 >= a:
-                    return [284, a - 227, 5];
-                case 258 === a:
-                    return [285, a - 258, 0];
-                default:
-                    throw "invalid length: " + a;
-                }
-            }
-            var d = [],
-                c, f;
-            for (c = 3; 258 >= c; c++) f = e(c), d[c] = f[2] << 24 | f[1] << 16 | f[0];
-            return d
-        }(),
-            Ga = C ? new Uint32Array(Fa) : Fa;
-
-        function na(e, d) {
-            function c(a, c) {
-                var b = a.g,
-                    d = [],
-                    f = 0,
-                    e;
-                e = Ga[a.length];
-                d[f++] = e & 65535;
-                d[f++] = e >> 16 & 255;
-                d[f++] = e >> 24;
-                var g;
-                switch (u) {
-                case 1 === b:
-                    g = [0, b - 1, 0];
-                    break;
-                case 2 === b:
-                    g = [1, b - 2, 0];
-                    break;
-                case 3 === b:
-                    g = [2, b - 3, 0];
-                    break;
-                case 4 === b:
-                    g = [3, b - 4, 0];
-                    break;
-                case 6 >= b:
-                    g = [4, b - 5, 1];
-                    break;
-                case 8 >= b:
-                    g = [5, b - 7, 1];
-                    break;
-                case 12 >= b:
-                    g = [6, b - 9, 2];
-                    break;
-                case 16 >= b:
-                    g = [7, b - 13, 2];
-                    break;
-                case 24 >= b:
-                    g = [8, b - 17, 3];
-                    break;
-                case 32 >= b:
-                    g = [9, b - 25, 3];
-                    break;
-                case 48 >= b:
-                    g = [10, b - 33, 4];
-                    break;
-                case 64 >= b:
-                    g = [11, b - 49, 4];
-                    break;
-                case 96 >= b:
-                    g = [12, b - 65, 5];
-                    break;
-                case 128 >= b:
-                    g = [13, b - 97, 5];
-                    break;
-                case 192 >= b:
-                    g = [14, b - 129, 6];
-                    break;
-                case 256 >= b:
-                    g = [15, b - 193, 6];
-                    break;
-                case 384 >= b:
-                    g = [16, b - 257, 7];
-                    break;
-                case 512 >= b:
-                    g = [17, b - 385, 7];
-                    break;
-                case 768 >= b:
-                    g = [18, b - 513, 8];
-                    break;
-                case 1024 >= b:
-                    g = [19, b - 769, 8];
-                    break;
-                case 1536 >= b:
-                    g = [20, b - 1025, 9];
-                    break;
-                case 2048 >= b:
-                    g = [21, b - 1537, 9];
-                    break;
-                case 3072 >= b:
-                    g = [22, b - 2049, 10];
-                    break;
-                case 4096 >= b:
-                    g = [23, b - 3073, 10];
-                    break;
-                case 6144 >= b:
-                    g = [24, b - 4097, 11];
-                    break;
-                case 8192 >= b:
-                    g = [25, b - 6145, 11];
-                    break;
-                case 12288 >= b:
-                    g = [26, b - 8193, 12];
-                    break;
-                case 16384 >= b:
-                    g = [27, b - 12289, 12];
-                    break;
-                case 24576 >= b:
-                    g = [28, b - 16385, 13];
-                    break;
-                case 32768 >= b:
-                    g = [29, b - 24577, 13];
-                    break;
-                default:
-                    throw "invalid distance";
-                }
-                e = g;
-                d[f++] = e[0];
-                d[f++] = e[1];
-                d[f++] = e[2];
-                var k, m;
-                k = 0;
-                for (m = d.length; k < m; ++k) l[h++] = d[k];
-                t[d[0]]++;
-                w[d[3]]++;
-                q = a.length + c - 1;
-                x = null
-            }
-            var f, a, b, k, m, g = {}, p, v, x, l = C ? new Uint16Array(2 * d.length) : [],
-                h = 0,
-                q = 0,
-                t = new(C ? Uint32Array : Array)(286),
-                w = new(C ? Uint32Array : Array)(30),
-                da = e.f,
-                z;
-            if (!C) {
-                for (b = 0; 285 >= b;) t[b++] = 0;
-                for (b = 0; 29 >= b;) w[b++] = 0
-            }
-            t[256] = 1;
-            f = 0;
-            for (a = d.length; f < a; ++f) {
-                b = m = 0;
-                for (k = 3; b < k && f + b !== a; ++b) m = m << 8 | d[f + b];
-                g[m] === n && (g[m] = []);
-                p = g[m];
-                if (!(0 < q--)) {
-                    for (; 0 < p.length && 32768 < f - p[0];) p.shift();
-                    if (f + 3 >= a) {
-                        x && c(x, - 1);
-                        b = 0;
-                        for (k = a - f; b < k; ++b) z = d[f + b], l[h++] = z, ++t[z];
-                        break
-                    }
-                    0 < p.length ? (v = Ha(d, f, p), x ? x.length < v.length ? (z = d[f - 1], l[h++] = z, ++t[z], c(v, 0)) : c(x, - 1) : v.length < da ? x = v : c(v, 0)) : x ? c(x, - 1) : (z = d[f], l[h++] = z, ++t[z])
-                }
-                p.push(f)
-            }
-            l[h++] = 256;
-            t[256]++;
-            e.j = t;
-            e.i = w;
-            return C ? l.subarray(0, h) : l
-        }
-
-        function Ha(e, d, c) {
-            var f, a, b = 0,
-                k, m, g, p, v = e.length;
-            m = 0;
-            p = c.length;
-            a: for (; m < p; m++) {
-                f = c[p - m - 1];
-                k = 3;
-                if (3 < b) {
-                    for (g = b; 3 < g; g--) if (e[f + g - 1] !== e[d + g - 1]) continue a;
-                    k = b
-                }
-                for (; 258 > k && d + k < v && e[f + k] === e[d + k];)++k;
-                k > b && (a = f, b = k);
-                if (258 === k) break
-            }
-            return new qa(b, d - a)
-        }
-
-        function oa(e, d) {
-            var c = e.length,
-                f = new ja(572),
-                a = new(C ? Uint8Array : Array)(c),
-                b, k, m, g, p;
-            if (!C) for (g = 0; g < c; g++) a[g] = 0;
-            for (g = 0; g < c; ++g) 0 < e[g] && f.push(g, e[g]);
-            b = Array(f.length / 2);
-            k = new(C ? Uint32Array : Array)(f.length / 2);
-            if (1 === b.length) return a[f.pop().index] = 1, a;
-            g = 0;
-            for (p = f.length / 2; g < p; ++g) b[g] = f.pop(), k[g] = b[g].value;
-            m = Ja(k, k.length, d);
-            g = 0;
-            for (p = b.length; g < p; ++g) a[b[g].index] = m[g];
-            return a
-        }
-
-        function Ja(e, d, c) {
-            function f(a) {
-                var b = g[a][p[a]];
-                b === d ? (f(a + 1), f(a + 1)) : --k[b];
-                ++p[a]
-            }
-            var a = new(C ? Uint16Array : Array)(c),
-                b = new(C ? Uint8Array : Array)(c),
-                k = new(C ? Uint8Array : Array)(d),
-                m = Array(c),
-                g = Array(c),
-                p = Array(c),
-                v = (1 << c) - d,
-                x = 1 << c - 1,
-                l, h, q, t, w;
-            a[c - 1] = d;
-            for (h = 0; h < c; ++h) v < x ? b[h] = 0 : (b[h] = 1, v -= x), v <<= 1, a[c - 2 - h] = (a[c - 1 - h] / 2 | 0) + d;
-            a[0] = b[0];
-            m[0] = Array(a[0]);
-            g[0] = Array(a[0]);
-            for (h = 1; h < c; ++h) a[h] > 2 * a[h - 1] + b[h] && (a[h] = 2 * a[h - 1] + b[h]), m[h] = Array(a[h]), g[h] = Array(a[h]);
-            for (l = 0; l < d; ++l) k[l] = c;
-            for (q = 0; q < a[c - 1]; ++q) m[c - 1][q] = e[q], g[c - 1][q] = q;
-            for (l = 0; l < c; ++l) p[l] = 0;
-            1 === b[c - 1] && (--k[0], ++p[c - 1]);
-            for (h = c - 2; 0 <= h; --h) {
-                t = l = 0;
-                w = p[h + 1];
-                for (q = 0; q < a[h]; q++) t = m[h + 1][w] + m[h + 1][w + 1], t > e[l] ? (m[h][q] = t, g[h][q] = d, w += 2) : (m[h][q] = e[l], g[h][q] = l, ++l);
-                p[h] = 0;
-                1 === b[h] && f(h)
-            }
-            return k
-        }
-
-        function pa(e) {
-            var d = new(C ? Uint16Array : Array)(e.length),
-                c = [],
-                f = [],
-                a = 0,
-                b, k, m, g;
-            b = 0;
-            for (k = e.length; b < k; b++) c[e[b]] = (c[e[b]] | 0) + 1;
-            b = 1;
-            for (k = 16; b <= k; b++) f[b] = a, a += c[b] | 0, a <<= 1;
-            b = 0;
-            for (k = e.length; b < k; b++) {
-                a = f[e[b]];
-                f[e[b]] += 1;
-                m = d[b] = 0;
-                for (g = e[b]; m < g; m++) d[b] = d[b] << 1 | a & 1, a >>>= 1
-            }
-            return d
-        };
-        ba("Zlib.RawDeflate", ka);
-        ba("Zlib.RawDeflate.prototype.compress", ka.prototype.h);
-        var Ka = {
-            NONE: 0,
-            FIXED: 1,
-            DYNAMIC: ma
-        }, V, La, $, Ma;
-        if (Object.keys) V = Object.keys(Ka);
-        else for (La in V = [], $ = 0, Ka) V[$++] = La;
-        $ = 0;
-        for (Ma = V.length; $ < Ma; ++$) La = V[$], ba("Zlib.RawDeflate.CompressionType." + La, Ka[La]);
-    }).call(this);
-
-
-}).call(context);
-
-module.exports = function(input) {
-    var deflate = new context.Zlib.RawDeflate(input);
-    return deflate.compress();
+  if (thenable) {
+    resolveThenable.safely(self, thenable);
+  } else {
+    self.state = states.FULFILLED;
+    self.outcome = value;
+    var i = -1;
+    var len = self.queue.length;
+    while (++i < len) {
+      self.queue[i].callFulfilled(value);
+    }
+  }
+  return self;
+};
+exports.reject = function (self, error) {
+  self.state = states.REJECTED;
+  self.outcome = error;
+  var i = -1;
+  var len = self.queue.length;
+  while (++i < len) {
+    self.queue[i].callRejected(error);
+  }
+  return self;
 };
 
-});
-require.register("calvinmetcalf-jszip/lib/flate/inflate.js", function(exports, require, module){
-var context = {};
-(function() {
+function getThen(obj) {
+  // Make sure we only access the accessor once as required by the spec
+  var then = obj && obj.then;
+  if (obj && typeof obj === 'object' && typeof then === 'function') {
+    return function appyThen() {
+      then.apply(obj, arguments);
+    };
+  }
+}
+},{"./resolveThenable":33,"./states":34,"./tryCatch":35}],27:[function(require,module,exports){
+module.exports = exports = require('./promise');
 
-    // https://github.com/imaya/zlib.js
-    // tag 0.1.6
-    // file bin/deflate.min.js
+exports.resolve = require('./resolve');
+exports.reject = require('./reject');
+exports.all = require('./all');
+exports.race = require('./race');
+},{"./all":25,"./promise":28,"./race":30,"./reject":31,"./resolve":32}],28:[function(require,module,exports){
+'use strict';
 
-    /** @license zlib.js 2012 - imaya [ https://github.com/imaya/zlib.js ] The MIT License */ (function() {
-        'use strict';
-        var l = void 0,
-            p = this;
+var unwrap = require('./unwrap');
+var INTERNAL = require('./INTERNAL');
+var resolveThenable = require('./resolveThenable');
+var states = require('./states');
+var QueueItem = require('./queueItem');
 
-        function q(c, d) {
-            var a = c.split("."),
-                b = p;
-            !(a[0] in b) && b.execScript && b.execScript("var " + a[0]);
-            for (var e; a.length && (e = a.shift());)!a.length && d !== l ? b[e] = d : b = b[e] ? b[e] : b[e] = {}
-        };
-        var r = "undefined" !== typeof Uint8Array && "undefined" !== typeof Uint16Array && "undefined" !== typeof Uint32Array;
+module.exports = Promise;
+function Promise(resolver) {
+  if (!(this instanceof Promise)) {
+    return new Promise(resolver);
+  }
+  if (typeof resolver !== 'function') {
+    throw new TypeError('resolver must be a function');
+  }
+  this.state = states.PENDING;
+  this.queue = [];
+  this.outcome = void 0;
+  if (resolver !== INTERNAL) {
+    resolveThenable.safely(this, resolver);
+  }
+}
 
-        function u(c) {
-            var d = c.length,
-                a = 0,
-                b = Number.POSITIVE_INFINITY,
-                e, f, g, h, k, m, s, n, t;
-            for (n = 0; n < d; ++n) c[n] > a && (a = c[n]), c[n] < b && (b = c[n]);
-            e = 1 << a;
-            f = new(r ? Uint32Array : Array)(e);
-            g = 1;
-            h = 0;
-            for (k = 2; g <= a;) {
-                for (n = 0; n < d; ++n) if (c[n] === g) {
-                    m = 0;
-                    s = h;
-                    for (t = 0; t < g; ++t) m = m << 1 | s & 1, s >>= 1;
-                    for (t = m; t < e; t += k) f[t] = g << 16 | n;
-                    ++h
-                }++g;
-                h <<= 1;
-                k <<= 1
-            }
-            return [f, a, b]
-        };
+Promise.prototype['catch'] = function (onRejected) {
+  return this.then(null, onRejected);
+};
+Promise.prototype.then = function (onFulfilled, onRejected) {
+  if (typeof onFulfilled !== 'function' && this.state === states.FULFILLED ||
+    typeof onRejected !== 'function' && this.state === states.REJECTED) {
+    return this;
+  }
+  var promise = new Promise(INTERNAL);
 
-        function v(c, d) {
-            this.g = [];
-            this.h = 32768;
-            this.c = this.f = this.d = this.k = 0;
-            this.input = r ? new Uint8Array(c) : c;
-            this.l = !1;
-            this.i = w;
-            this.p = !1;
-            if (d || !(d = {})) d.index && (this.d = d.index), d.bufferSize && (this.h = d.bufferSize), d.bufferType && (this.i = d.bufferType), d.resize && (this.p = d.resize);
-            switch (this.i) {
-            case x:
-                this.a = 32768;
-                this.b = new(r ? Uint8Array : Array)(32768 + this.h + 258);
-                break;
-            case w:
-                this.a = 0;
-                this.b = new(r ? Uint8Array : Array)(this.h);
-                this.e = this.u;
-                this.m = this.r;
-                this.j = this.s;
-                break;
-            default:
-                throw Error("invalid inflate mode");
-            }
-        }
-        var x = 0,
-            w = 1;
-        v.prototype.t = function() {
-            for (; !this.l;) {
-                var c = y(this, 3);
-                c & 1 && (this.l = !0);
-                c >>>= 1;
-                switch (c) {
-                case 0:
-                    var d = this.input,
-                        a = this.d,
-                        b = this.b,
-                        e = this.a,
-                        f = l,
-                        g = l,
-                        h = l,
-                        k = b.length,
-                        m = l;
-                    this.c = this.f = 0;
-                    f = d[a++];
-                    if (f === l) throw Error("invalid uncompressed block header: LEN (first byte)");
-                    g = f;
-                    f = d[a++];
-                    if (f === l) throw Error("invalid uncompressed block header: LEN (second byte)");
-                    g |= f << 8;
-                    f = d[a++];
-                    if (f === l) throw Error("invalid uncompressed block header: NLEN (first byte)");
-                    h = f;
-                    f = d[a++];
-                    if (f === l) throw Error("invalid uncompressed block header: NLEN (second byte)");
-                    h |= f << 8;
-                    if (g === ~h) throw Error("invalid uncompressed block header: length verify");
-                    if (a + g > d.length) throw Error("input buffer is broken");
-                    switch (this.i) {
-                    case x:
-                        for (; e + g > b.length;) {
-                            m = k - e;
-                            g -= m;
-                            if (r) b.set(d.subarray(a, a + m), e), e += m, a += m;
-                            else for (; m--;) b[e++] = d[a++];
-                            this.a = e;
-                            b = this.e();
-                            e = this.a
-                        }
-                        break;
-                    case w:
-                        for (; e + g > b.length;) b = this.e({
-                            o: 2
-                        });
-                        break;
-                    default:
-                        throw Error("invalid inflate mode");
-                    }
-                    if (r) b.set(d.subarray(a, a + g), e), e += g, a += g;
-                    else for (; g--;) b[e++] = d[a++];
-                    this.d = a;
-                    this.a = e;
-                    this.b = b;
-                    break;
-                case 1:
-                    this.j(z,
-                    A);
-                    break;
-                case 2:
-                    B(this);
-                    break;
-                default:
-                    throw Error("unknown BTYPE: " + c);
-                }
-            }
-            return this.m()
-        };
-        var C = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15],
-            D = r ? new Uint16Array(C) : C,
-            E = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258, 258, 258],
-            F = r ? new Uint16Array(E) : E,
-            G = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0],
-            H = r ? new Uint8Array(G) : G,
-            I = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577],
-            J = r ? new Uint16Array(I) : I,
-            K = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
-            13],
-            L = r ? new Uint8Array(K) : K,
-            M = new(r ? Uint8Array : Array)(288),
-            N, O;
-        N = 0;
-        for (O = M.length; N < O; ++N) M[N] = 143 >= N ? 8 : 255 >= N ? 9 : 279 >= N ? 7 : 8;
-        var z = u(M),
-            P = new(r ? Uint8Array : Array)(30),
-            Q, R;
-        Q = 0;
-        for (R = P.length; Q < R; ++Q) P[Q] = 5;
-        var A = u(P);
+  
+  if (this.state !== states.PENDING) {
+    var resolver = this.state === states.FULFILLED ? onFulfilled: onRejected;
+    unwrap(promise, resolver, this.outcome);
+  } else {
+    this.queue.push(new QueueItem(promise, onFulfilled, onRejected));
+  }
 
-        function y(c, d) {
-            for (var a = c.f, b = c.c, e = c.input, f = c.d, g; b < d;) {
-                g = e[f++];
-                if (g === l) throw Error("input buffer is broken");
-                a |= g << b;
-                b += 8
-            }
-            g = a & (1 << d) - 1;
-            c.f = a >>> d;
-            c.c = b - d;
-            c.d = f;
-            return g
-        }
-
-        function S(c, d) {
-            for (var a = c.f, b = c.c, e = c.input, f = c.d, g = d[0], h = d[1], k, m, s; b < h;) {
-                k = e[f++];
-                if (k === l) break;
-                a |= k << b;
-                b += 8
-            }
-            m = g[a & (1 << h) - 1];
-            s = m >>> 16;
-            c.f = a >> s;
-            c.c = b - s;
-            c.d = f;
-            return m & 65535
-        }
-
-        function B(c) {
-            function d(a, c, b) {
-                var d, f, e, g;
-                for (g = 0; g < a;) switch (d = S(this, c), d) {
-                case 16:
-                    for (e = 3 + y(this, 2); e--;) b[g++] = f;
-                    break;
-                case 17:
-                    for (e = 3 + y(this, 3); e--;) b[g++] = 0;
-                    f = 0;
-                    break;
-                case 18:
-                    for (e = 11 + y(this, 7); e--;) b[g++] = 0;
-                    f = 0;
-                    break;
-                default:
-                    f = b[g++] = d
-                }
-                return b
-            }
-            var a = y(c, 5) + 257,
-                b = y(c, 5) + 1,
-                e = y(c, 4) + 4,
-                f = new(r ? Uint8Array : Array)(D.length),
-                g, h, k, m;
-            for (m = 0; m < e; ++m) f[D[m]] = y(c, 3);
-            g = u(f);
-            h = new(r ? Uint8Array : Array)(a);
-            k = new(r ? Uint8Array : Array)(b);
-            c.j(u(d.call(c, a, g, h)), u(d.call(c, b, g, k)))
-        }
-        v.prototype.j = function(c, d) {
-            var a = this.b,
-                b = this.a;
-            this.n = c;
-            for (var e = a.length - 258, f, g, h, k; 256 !== (f = S(this, c));) if (256 > f) b >= e && (this.a = b, a = this.e(), b = this.a), a[b++] = f;
-            else {
-                g = f - 257;
-                k = F[g];
-                0 < H[g] && (k += y(this, H[g]));
-                f = S(this, d);
-                h = J[f];
-                0 < L[f] && (h += y(this, L[f]));
-                b >= e && (this.a = b, a = this.e(), b = this.a);
-                for (; k--;) a[b] = a[b++-h]
-            }
-            for (; 8 <= this.c;) this.c -= 8, this.d--;
-            this.a = b
-        };
-        v.prototype.s = function(c, d) {
-            var a = this.b,
-                b = this.a;
-            this.n = c;
-            for (var e = a.length, f, g, h, k; 256 !== (f = S(this, c));) if (256 > f) b >= e && (a = this.e(), e = a.length), a[b++] = f;
-            else {
-                g = f - 257;
-                k = F[g];
-                0 < H[g] && (k += y(this, H[g]));
-                f = S(this, d);
-                h = J[f];
-                0 < L[f] && (h += y(this, L[f]));
-                b + k > e && (a = this.e(), e = a.length);
-                for (; k--;) a[b] = a[b++-h]
-            }
-            for (; 8 <= this.c;) this.c -= 8, this.d--;
-            this.a = b
-        };
-        v.prototype.e = function() {
-            var c = new(r ? Uint8Array : Array)(this.a - 32768),
-                d = this.a - 32768,
-                a, b, e = this.b;
-            if (r) c.set(e.subarray(32768, c.length));
-            else {
-                a = 0;
-                for (b = c.length; a < b; ++a) c[a] = e[a + 32768]
-            }
-            this.g.push(c);
-            this.k += c.length;
-            if (r) e.set(e.subarray(d, d + 32768));
-            else for (a = 0; 32768 > a; ++a) e[a] = e[d + a];
-            this.a = 32768;
-            return e
-        };
-        v.prototype.u = function(c) {
-            var d, a = this.input.length / this.d + 1 | 0,
-                b, e, f, g = this.input,
-                h = this.b;
-            c && ("number" === typeof c.o && (a = c.o), "number" === typeof c.q && (a += c.q));
-            2 > a ? (b = (g.length - this.d) / this.n[2], f = 258 * (b / 2) | 0, e = f < h.length ? h.length + f : h.length << 1) : e = h.length * a;
-            r ? (d = new Uint8Array(e), d.set(h)) : d = h;
-            return this.b = d
-        };
-        v.prototype.m = function() {
-            var c = 0,
-                d = this.b,
-                a = this.g,
-                b, e = new(r ? Uint8Array : Array)(this.k + (this.a - 32768)),
-                f, g, h, k;
-            if (0 === a.length) return r ? this.b.subarray(32768, this.a) : this.b.slice(32768, this.a);
-            f = 0;
-            for (g = a.length; f < g; ++f) {
-                b = a[f];
-                h = 0;
-                for (k = b.length; h < k; ++h) e[c++] = b[h]
-            }
-            f = 32768;
-            for (g = this.a; f < g; ++f) e[c++] = d[f];
-            this.g = [];
-            return this.buffer = e
-        };
-        v.prototype.r = function() {
-            var c, d = this.a;
-            r ? this.p ? (c = new Uint8Array(d), c.set(this.b.subarray(0, d))) : c = this.b.subarray(0, d) : (this.b.length > d && (this.b.length = d), c = this.b);
-            return this.buffer = c
-        };
-        q("Zlib.RawInflate", v);
-        q("Zlib.RawInflate.prototype.decompress", v.prototype.t);
-        var T = {
-            ADAPTIVE: w,
-            BLOCK: x
-        }, U, V, W, X;
-        if (Object.keys) U = Object.keys(T);
-        else for (V in U = [], W = 0, T) U[W++] = V;
-        W = 0;
-        for (X = U.length; W < X; ++W) V = U[W], q("Zlib.RawInflate.BufferType." + V, T[V]);
-    }).call(this);
-
-
-}).call(context);
-
-module.exports = function(input) {
-    var inflate = new context.Zlib.RawInflate(new Uint8Array(input));
-    return inflate.decompress();
+  return promise;
 };
 
-});
-require.register("proj4js-proj4js/dist/proj4.js", function(exports, require, module){
-(function(e){if("function"==typeof bootstrap)bootstrap("proj4",e);else if("object"==typeof exports)module.exports=e();else if("function"==typeof define&&define.amd)define(e);else if("undefined"!=typeof ses){if(!ses.ok())return;ses.makeProj4=e}else"undefined"!=typeof window?window.proj4=e():global.proj4=e()})(function(){var define,ses,bootstrap,module,exports;
-return (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);throw new Error("Cannot find module '"+o+"'")}var f=n[o]={exports:{}};t[o][0].call(f.exports,function(e){var n=t[o][1][e];return s(n?n:e)},f,f.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
-var mgrs = require('./mgrs');
+},{"./INTERNAL":24,"./queueItem":29,"./resolveThenable":33,"./states":34,"./unwrap":36}],29:[function(require,module,exports){
+'use strict';
+var handlers = require('./handlers');
+var unwrap = require('./unwrap');
+
+module.exports = QueueItem;
+function QueueItem(promise, onFulfilled, onRejected) {
+  this.promise = promise;
+  if (typeof onFulfilled === 'function') {
+    this.onFulfilled = onFulfilled;
+    this.callFulfilled = this.otherCallFulfilled;
+  }
+  if (typeof onRejected === 'function') {
+    this.onRejected = onRejected;
+    this.callRejected = this.otherCallRejected;
+  }
+}
+QueueItem.prototype.callFulfilled = function (value) {
+  handlers.resolve(this.promise, value);
+};
+QueueItem.prototype.otherCallFulfilled = function (value) {
+  unwrap(this.promise, this.onFulfilled, value);
+};
+QueueItem.prototype.callRejected = function (value) {
+  handlers.reject(this.promise, value);
+};
+QueueItem.prototype.otherCallRejected = function (value) {
+  unwrap(this.promise, this.onRejected, value);
+};
+},{"./handlers":26,"./unwrap":36}],30:[function(require,module,exports){
+'use strict';
+var Promise = require('./promise');
+var reject = require('./reject');
+var resolve = require('./resolve');
+var INTERNAL = require('./INTERNAL');
+var handlers = require('./handlers');
+module.exports = race;
+function race(iterable) {
+  if (Object.prototype.toString.call(iterable) !== '[object Array]') {
+    return reject(new TypeError('must be an array'));
+  }
+
+  var len = iterable.length;
+  var called = false;
+  if (!len) {
+    return resolve([]);
+  }
+
+  var resolved = 0;
+  var i = -1;
+  var promise = new Promise(INTERNAL);
+  
+  while (++i < len) {
+    resolver(iterable[i]);
+  }
+  return promise;
+  function resolver(value) {
+    resolve(value).then(function (response) {
+      if (!called) {
+        called = true;
+        handlers.resolve(promise, response);
+      }
+    }, function (error) {
+      if (!called) {
+        called = true;
+        handlers.reject(promise, error);
+      }
+    });
+  }
+}
+},{"./INTERNAL":24,"./handlers":26,"./promise":28,"./reject":31,"./resolve":32}],31:[function(require,module,exports){
+'use strict';
+
+var Promise = require('./promise');
+var INTERNAL = require('./INTERNAL');
+var handlers = require('./handlers');
+module.exports = reject;
+
+function reject(reason) {
+	var promise = new Promise(INTERNAL);
+	return handlers.reject(promise, reason);
+}
+},{"./INTERNAL":24,"./handlers":26,"./promise":28}],32:[function(require,module,exports){
+'use strict';
+
+var Promise = require('./promise');
+var INTERNAL = require('./INTERNAL');
+var handlers = require('./handlers');
+module.exports = resolve;
+
+var FALSE = handlers.resolve(new Promise(INTERNAL), false);
+var NULL = handlers.resolve(new Promise(INTERNAL), null);
+var UNDEFINED = handlers.resolve(new Promise(INTERNAL), void 0);
+var ZERO = handlers.resolve(new Promise(INTERNAL), 0);
+var EMPTYSTRING = handlers.resolve(new Promise(INTERNAL), '');
+
+function resolve(value) {
+  if (value) {
+    if (value instanceof Promise) {
+      return value;
+    }
+    return handlers.resolve(new Promise(INTERNAL), value);
+  }
+  var valueType = typeof value;
+  switch (valueType) {
+    case 'boolean':
+      return FALSE;
+    case 'undefined':
+      return UNDEFINED;
+    case 'object':
+      return NULL;
+    case 'number':
+      return ZERO;
+    case 'string':
+      return EMPTYSTRING;
+  }
+}
+},{"./INTERNAL":24,"./handlers":26,"./promise":28}],33:[function(require,module,exports){
+'use strict';
+var handlers = require('./handlers');
+var tryCatch = require('./tryCatch');
+function safelyResolveThenable(self, thenable) {
+  // Either fulfill, reject or reject with error
+  var called = false;
+  function onError(value) {
+    if (called) {
+      return;
+    }
+    called = true;
+    handlers.reject(self, value);
+  }
+
+  function onSuccess(value) {
+    if (called) {
+      return;
+    }
+    called = true;
+    handlers.resolve(self, value);
+  }
+
+  function tryToUnwrap() {
+    thenable(onSuccess, onError);
+  }
+  
+  var result = tryCatch(tryToUnwrap);
+  if (result.status === 'error') {
+    onError(result.value);
+  }
+}
+exports.safely = safelyResolveThenable;
+},{"./handlers":26,"./tryCatch":35}],34:[function(require,module,exports){
+// Lazy man's symbols for states
+
+exports.REJECTED = ['REJECTED'];
+exports.FULFILLED = ['FULFILLED'];
+exports.PENDING = ['PENDING'];
+},{}],35:[function(require,module,exports){
+'use strict';
+
+module.exports = tryCatch;
+
+function tryCatch(func, value) {
+  var out = {};
+  try {
+    out.value = func(value);
+    out.status = 'success';
+  } catch (e) {
+    out.status = 'error';
+    out.value = e;
+  }
+  return out;
+}
+},{}],36:[function(require,module,exports){
+'use strict';
+
+var immediate = require('immediate');
+var handlers = require('./handlers');
+module.exports = unwrap;
+
+function unwrap(promise, func, value) {
+  immediate(function () {
+    var returnValue;
+    try {
+      returnValue = func(value);
+    } catch (e) {
+      return handlers.reject(promise, e);
+    }
+    if (returnValue === promise) {
+      handlers.reject(promise, new TypeError('Cannot resolve promise with itself'));
+    } else {
+      handlers.resolve(promise, returnValue);
+    }
+  });
+}
+},{"./handlers":26,"immediate":37}],37:[function(require,module,exports){
+'use strict';
+var types = [
+  require('./nextTick'),
+  require('./mutation.js'),
+  require('./messageChannel'),
+  require('./stateChange'),
+  require('./timeout')
+];
+var draining;
+var queue = [];
+function drainQueue() {
+  draining = true;
+  var i, oldQueue;
+  var len = queue.length;
+  while (len) {
+    oldQueue = queue;
+    queue = [];
+    i = -1;
+    while (++i < len) {
+      oldQueue[i]();
+    }
+    len = queue.length;
+  }
+  draining = false;
+}
+var scheduleDrain;
+var i = -1;
+var len = types.length;
+while (++ i < len) {
+  if (types[i] && types[i].test && types[i].test()) {
+    scheduleDrain = types[i].install(drainQueue);
+    break;
+  }
+}
+module.exports = immediate;
+function immediate(task) {
+  if (queue.push(task) === 1 && !draining) {
+    scheduleDrain();
+  }
+}
+},{"./messageChannel":38,"./mutation.js":39,"./nextTick":112,"./stateChange":40,"./timeout":41}],38:[function(require,module,exports){
+(function (global){
+'use strict';
+
+exports.test = function () {
+  if (global.setImmediate) {
+    // we can only get here in IE10
+    // which doesn't handel postMessage well
+    return false;
+  }
+  return typeof global.MessageChannel !== 'undefined';
+};
+
+exports.install = function (func) {
+  var channel = new global.MessageChannel();
+  channel.port1.onmessage = func;
+  return function () {
+    channel.port2.postMessage(0);
+  };
+};
+}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{}],39:[function(require,module,exports){
+(function (global){
+'use strict';
+//based off rsvp https://github.com/tildeio/rsvp.js
+//license https://github.com/tildeio/rsvp.js/blob/master/LICENSE
+//https://github.com/tildeio/rsvp.js/blob/master/lib/rsvp/asap.js
+
+var Mutation = global.MutationObserver || global.WebKitMutationObserver;
+
+exports.test = function () {
+  return Mutation;
+};
+
+exports.install = function (handle) {
+  var called = 0;
+  var observer = new Mutation(handle);
+  var element = global.document.createTextNode('');
+  observer.observe(element, {
+    characterData: true
+  });
+  return function () {
+    element.data = (called = ++called % 2);
+  };
+};
+}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{}],40:[function(require,module,exports){
+(function (global){
+'use strict';
+
+exports.test = function () {
+  return 'document' in global && 'onreadystatechange' in global.document.createElement('script');
+};
+
+exports.install = function (handle) {
+  return function () {
+
+    // Create a <script> element; its readystatechange event will be fired asynchronously once it is inserted
+    // into the document. Do so, thus queuing up the task. Remember to clean up once it's been called.
+    var scriptEl = global.document.createElement('script');
+    scriptEl.onreadystatechange = function () {
+      handle();
+
+      scriptEl.onreadystatechange = null;
+      scriptEl.parentNode.removeChild(scriptEl);
+      scriptEl = null;
+    };
+    global.document.documentElement.appendChild(scriptEl);
+
+    return handle;
+  };
+};
+}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{}],41:[function(require,module,exports){
+'use strict';
+exports.test = function () {
+  return true;
+};
+
+exports.install = function (t) {
+  return function () {
+    setTimeout(t, 0);
+  };
+};
+},{}],42:[function(require,module,exports){
+;(function () { // closure for web browsers
+
+if (typeof module === 'object' && module.exports) {
+  module.exports = LRUCache
+} else {
+  // just set the global for non-node platforms.
+  this.LRUCache = LRUCache
+}
+
+function hOP (obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj, key)
+}
+
+function naiveLength () { return 1 }
+
+function LRUCache (options) {
+  if (!(this instanceof LRUCache))
+    return new LRUCache(options)
+
+  if (typeof options === 'number')
+    options = { max: options }
+
+  if (!options)
+    options = {}
+
+  this._max = options.max
+  // Kind of weird to have a default max of Infinity, but oh well.
+  if (!this._max || !(typeof this._max === "number") || this._max <= 0 )
+    this._max = Infinity
+
+  this._lengthCalculator = options.length || naiveLength
+  if (typeof this._lengthCalculator !== "function")
+    this._lengthCalculator = naiveLength
+
+  this._allowStale = options.stale || false
+  this._maxAge = options.maxAge || null
+  this._dispose = options.dispose
+  this.reset()
+}
+
+// resize the cache when the max changes.
+Object.defineProperty(LRUCache.prototype, "max",
+  { set : function (mL) {
+      if (!mL || !(typeof mL === "number") || mL <= 0 ) mL = Infinity
+      this._max = mL
+      if (this._length > this._max) trim(this)
+    }
+  , get : function () { return this._max }
+  , enumerable : true
+  })
+
+// resize the cache when the lengthCalculator changes.
+Object.defineProperty(LRUCache.prototype, "lengthCalculator",
+  { set : function (lC) {
+      if (typeof lC !== "function") {
+        this._lengthCalculator = naiveLength
+        this._length = this._itemCount
+        for (var key in this._cache) {
+          this._cache[key].length = 1
+        }
+      } else {
+        this._lengthCalculator = lC
+        this._length = 0
+        for (var key in this._cache) {
+          this._cache[key].length = this._lengthCalculator(this._cache[key].value)
+          this._length += this._cache[key].length
+        }
+      }
+
+      if (this._length > this._max) trim(this)
+    }
+  , get : function () { return this._lengthCalculator }
+  , enumerable : true
+  })
+
+Object.defineProperty(LRUCache.prototype, "length",
+  { get : function () { return this._length }
+  , enumerable : true
+  })
+
+
+Object.defineProperty(LRUCache.prototype, "itemCount",
+  { get : function () { return this._itemCount }
+  , enumerable : true
+  })
+
+LRUCache.prototype.forEach = function (fn, thisp) {
+  thisp = thisp || this
+  var i = 0;
+  for (var k = this._mru - 1; k >= 0 && i < this._itemCount; k--) if (this._lruList[k]) {
+    i++
+    var hit = this._lruList[k]
+    if (this._maxAge && (Date.now() - hit.now > this._maxAge)) {
+      del(this, hit)
+      if (!this._allowStale) hit = undefined
+    }
+    if (hit) {
+      fn.call(thisp, hit.value, hit.key, this)
+    }
+  }
+}
+
+LRUCache.prototype.keys = function () {
+  var keys = new Array(this._itemCount)
+  var i = 0
+  for (var k = this._mru - 1; k >= 0 && i < this._itemCount; k--) if (this._lruList[k]) {
+    var hit = this._lruList[k]
+    keys[i++] = hit.key
+  }
+  return keys
+}
+
+LRUCache.prototype.values = function () {
+  var values = new Array(this._itemCount)
+  var i = 0
+  for (var k = this._mru - 1; k >= 0 && i < this._itemCount; k--) if (this._lruList[k]) {
+    var hit = this._lruList[k]
+    values[i++] = hit.value
+  }
+  return values
+}
+
+LRUCache.prototype.reset = function () {
+  if (this._dispose && this._cache) {
+    for (var k in this._cache) {
+      this._dispose(k, this._cache[k].value)
+    }
+  }
+
+  this._cache = Object.create(null) // hash of items by key
+  this._lruList = Object.create(null) // list of items in order of use recency
+  this._mru = 0 // most recently used
+  this._lru = 0 // least recently used
+  this._length = 0 // number of items in the list
+  this._itemCount = 0
+}
+
+// Provided for debugging/dev purposes only. No promises whatsoever that
+// this API stays stable.
+LRUCache.prototype.dump = function () {
+  return this._cache
+}
+
+LRUCache.prototype.dumpLru = function () {
+  return this._lruList
+}
+
+LRUCache.prototype.set = function (key, value) {
+  if (hOP(this._cache, key)) {
+    // dispose of the old one before overwriting
+    if (this._dispose) this._dispose(key, this._cache[key].value)
+    if (this._maxAge) this._cache[key].now = Date.now()
+    this._cache[key].value = value
+    this.get(key)
+    return true
+  }
+
+  var len = this._lengthCalculator(value)
+  var age = this._maxAge ? Date.now() : 0
+  var hit = new Entry(key, value, this._mru++, len, age)
+
+  // oversized objects fall out of cache automatically.
+  if (hit.length > this._max) {
+    if (this._dispose) this._dispose(key, value)
+    return false
+  }
+
+  this._length += hit.length
+  this._lruList[hit.lu] = this._cache[key] = hit
+  this._itemCount ++
+
+  if (this._length > this._max) trim(this)
+  return true
+}
+
+LRUCache.prototype.has = function (key) {
+  if (!hOP(this._cache, key)) return false
+  var hit = this._cache[key]
+  if (this._maxAge && (Date.now() - hit.now > this._maxAge)) {
+    return false
+  }
+  return true
+}
+
+LRUCache.prototype.get = function (key) {
+  return get(this, key, true)
+}
+
+LRUCache.prototype.peek = function (key) {
+  return get(this, key, false)
+}
+
+LRUCache.prototype.pop = function () {
+  var hit = this._lruList[this._lru]
+  del(this, hit)
+  return hit || null
+}
+
+LRUCache.prototype.del = function (key) {
+  del(this, this._cache[key])
+}
+
+function get (self, key, doUse) {
+  var hit = self._cache[key]
+  if (hit) {
+    if (self._maxAge && (Date.now() - hit.now > self._maxAge)) {
+      del(self, hit)
+      if (!self._allowStale) hit = undefined
+    } else {
+      if (doUse) use(self, hit)
+    }
+    if (hit) hit = hit.value
+  }
+  return hit
+}
+
+function use (self, hit) {
+  shiftLU(self, hit)
+  hit.lu = self._mru ++
+  self._lruList[hit.lu] = hit
+}
+
+function trim (self) {
+  while (self._lru < self._mru && self._length > self._max)
+    del(self, self._lruList[self._lru])
+}
+
+function shiftLU (self, hit) {
+  delete self._lruList[ hit.lu ]
+  while (self._lru < self._mru && !self._lruList[self._lru]) self._lru ++
+}
+
+function del (self, hit) {
+  if (hit) {
+    if (self._dispose) self._dispose(hit.key, hit.value)
+    self._length -= hit.length
+    self._itemCount --
+    delete self._cache[ hit.key ]
+    shiftLU(self, hit)
+  }
+}
+
+// classy, since V8 prefers predictable objects.
+function Entry (key, value, lu, length, now) {
+  this.key = key
+  this.value = value
+  this.lu = lu
+  this.length = length
+  this.now = now
+}
+
+})()
+
+},{}],43:[function(require,module,exports){
+function dbfHeader(buffer){
+	var data = new DataView(buffer);
+	var out = {};
+	out.lastUpdated = new Date(data.getUint8(1,true)+1900,data.getUint8(2,true),data.getUint8(3,true));
+	out.records = data.getUint32(4,true);
+	out.headerLen = data.getUint16(8,true);
+	out.recLen = data.getUint16(10,true);
+	return out;
+}
+
+function dbfRowHeader(buffer){
+	var data = new DataView(buffer);
+	var out = [];
+	var offset = 32;
+	while(true){
+		out.push({
+			name : String.fromCharCode.apply(this,(new Uint8Array(buffer,offset,10))).replace(/\0|\s+$/g,''),
+			dataType : String.fromCharCode(data.getUint8(offset+11)),
+			len : data.getUint8(offset+16),
+			decimal : data.getUint8(offset+17)
+		});
+		if(data.getUint8(offset+32)===13){
+			break;
+		}else{
+			offset+=32;
+		}
+	}
+	return out;
+}
+function rowFuncs(buffer,offset,len,type){
+	var data = (new Uint8Array(buffer,offset,len));
+	var textData = String.fromCharCode.apply(this,data).replace(/\0|\s+$/g,'');
+	switch(type){
+		case 'N':
+		case 'F':
+		case 'O':
+			return parseFloat(textData,10);
+		case 'D':
+			return new Date(textData.slice(0,4), parseInt(textData.slice(4,6),10)-1, textData.slice(6,8));
+		case 'L':
+			return textData.toLowerCase() === 'y' || textData.toLowerCase() === 't';
+		default:
+			return textData;
+	}
+}
+function parseRow(buffer,offset,rowHeaders){
+	var out={};
+	var i = 0;
+	var len = rowHeaders.length;
+	var field;
+	var header;
+	while(i<len){
+		header = rowHeaders[i];
+		field = rowFuncs(buffer,offset,header.len,header.dataType);
+		offset += header.len;
+		if(typeof field !== 'undefined'){
+			out[header.name]=field;
+		}
+		i++;
+	}
+	return out;
+}
+module.exports = function(buffer){
+	var rowHeaders = dbfRowHeader(buffer);
+	var header = dbfHeader(buffer);
+	var offset = ((rowHeaders.length+1)<<5)+2;
+	var recLen = header.recLen;
+	var records = header.records;
+	var out = [];
+	while(records){
+		out.push(parseRow(buffer,offset,rowHeaders));
+		offset += recLen;
+		records--;
+	}
+	return out;
+};
+
+},{}],44:[function(require,module,exports){
+var mgrs = require('mgrs');
 
 function Point(x, y, z) {
   if (!(this instanceof Point)) {
     return new Point(x, y, z);
   }
-  if (typeof x === 'object') {
+  if (Array.isArray(x)) {
     this.x = x[0];
     this.y = x[1];
     this.z = x[2] || 0.0;
-  }
-  else if (typeof x === 'string' && typeof y === 'undefined') {
+  }else if(typeof x === 'object'){
+    this.x = x.x;
+    this.y = x.y;
+    this.z = x.z || 0.0;
+  } else if (typeof x === 'string' && typeof y === 'undefined') {
     var coords = x.split(',');
-    this.x = parseFloat(coords[0]);
-    this.y = parseFloat(coords[1]);
-    this.z = parseFloat(coords[2]) || 0.0;
+    this.x = parseFloat(coords[0], 10);
+    this.y = parseFloat(coords[1], 10);
+    this.z = parseFloat(coords[2], 10) || 0.0;
   }
   else {
     this.x = x;
     this.y = y;
     this.z = z || 0.0;
   }
-  this.clone = function() {
-    return new Point(this.x, this.y, this.z);
-  };
-  this.toString = function() {
-    return ("x=" + this.x + ",y=" + this.y);
-  };
-  /** 
-   * APIMethod: toShortString
-   * Return a short string version of the point.
-   *
-   * Return:
-   * {String} Shortened String representation of ..Point object. 
-   *         (ex. <i>"5, 42"</i>)
-   */
-  this.toShortString = function() {
-    return (this.x + ", " + this.y);
-  };
+  console.warn('proj4.Point will be removed in version 3, use proj4.toPoint');
 }
 
 Point.fromMGRS = function(mgrsStr) {
-  var llbbox = mgrs.inverse(mgrsStr);
-  return new Point((llbbox[2] + llbbox[0]) / 2, (llbbox[3] + llbbox[1]) / 2);
+  return new Point(mgrs.toPoint(mgrsStr));
 };
 Point.prototype.toMGRS = function(accuracy) {
-  return mgrs.forward({
-    lon: this.x,
-    lat: this.y
-  }, accuracy);
+  return mgrs.forward([this.x, this.y], accuracy);
 };
 module.exports = Point;
-},{"./mgrs":17}],2:[function(require,module,exports){
+},{"mgrs":110}],45:[function(require,module,exports){
+var parseCode = require("./parseCode");
 var extend = require('./extend');
-var common = require('./common');
-var defs = require('./defs');
-var constants = require('./constants');
-var datum = require('./datum');
 var projections = require('./projections');
-var wkt = require('./wkt');
-var projStr = require('./projString');
+var deriveConstants = require('./deriveConstants');
 
-function proj(srsCode) {
-  if (!(this instanceof proj)) {
-    return new proj(srsCode);
+function Projection(srsCode,callback) {
+  if (!(this instanceof Projection)) {
+    return new Projection(srsCode);
   }
-  this.srsCodeInput = srsCode;
-  this.x0 = 0;
-  this.y0 = 0;
-  var obj;
-  if (typeof srsCode === 'string') {
-    //check to see if this is a WKT string
-    if (srsCode in defs) {
-      this.deriveConstants(defs[srsCode]);
-      extend(this, defs[srsCode]);
+  callback = callback || function(error){
+    if(error){
+      throw error;
     }
-    else if ((srsCode.indexOf('GEOGCS') >= 0) || (srsCode.indexOf('GEOCCS') >= 0) || (srsCode.indexOf('PROJCS') >= 0) || (srsCode.indexOf('LOCAL_CS') >= 0)) {
-      obj = wkt(srsCode);
-      this.deriveConstants(obj);
-      extend(this, obj);
-      //this.loadProjCode(this.projName);
-    }
-    else if (srsCode[0] === '+') {
-      obj = projStr(srsCode);
-      this.deriveConstants(obj);
-      extend(this, obj);
-    }
+  };
+  var json = parseCode(srsCode);
+  if(typeof json !== 'object'){
+    callback(srsCode);
+    return;
   }
-  else {
-    this.deriveConstants(srsCode);
-    extend(this, srsCode);
+  var modifiedJSON = deriveConstants(json);
+  var ourProj = Projection.projections.get(modifiedJSON.projName);
+  if(ourProj){
+    extend(this, modifiedJSON);
+    extend(this, ourProj);
+    this.init();
+    callback(null, this);
+  }else{
+    callback(srsCode);
   }
-
-  this.initTransforms(this.projName);
 }
-proj.projections = projections;
-proj.projections.start();
-proj.prototype = {
-  /**
-   * Function: initTransforms
-   *    Finalize the initialization of the Proj object
-   *
-   */
-  initTransforms: function(projName) {
-    var ourProj = proj.projections.get(projName);
-    if (ourProj) {
-      extend(this, ourProj);
-      this.init();
-    }
-    else {
-      throw ("unknown projection " + projName);
-    }
-  },
+Projection.projections = projections;
+Projection.projections.start();
+module.exports = Projection;
 
-  deriveConstants: function(self) {
-    // DGR 2011-03-20 : nagrids -> nadgrids
-    if (self.nadgrids && self.nadgrids.length === 0) {
-      self.nadgrids = null;
-    }
-    if (self.nadgrids) {
-      self.grids = self.nadgrids.split(",");
-      var g = null,
-        l = self.grids.length;
-      if (l > 0) {
-        for (var i = 0; i < l; i++) {
-          g = self.grids[i];
-          var fg = g.split("@");
-          if (fg[fg.length - 1] === "") {
-            //..reportError("nadgrids syntax error '" + self.nadgrids + "' : empty grid found");
-            continue;
-          }
-          self.grids[i] = {
-            mandatory: fg.length === 1, //@=> optional grid (no error if not found)
-            name: fg[fg.length - 1],
-            grid: constants.grids[fg[fg.length - 1]] //FIXME: grids loading ...
-          };
-          if (self.grids[i].mandatory && !self.grids[i].grid) {
-            //..reportError("Missing '" + self.grids[i].name + "'");
-          }
-        }
-      }
-      // DGR, 2011-03-20: grids is an array of objects that hold
-      // the loaded grids, its name and the mandatory informations of it.
-    }
-    if (self.datumCode && self.datumCode !== 'none') {
-      var datumDef = constants.Datum[self.datumCode];
-      if (datumDef) {
-        self.datum_params = datumDef.towgs84 ? datumDef.towgs84.split(',') : null;
-        self.ellps = datumDef.ellipse;
-        self.datumName = datumDef.datumName ? datumDef.datumName : self.datumCode;
-      }
-    }
-    if (!self.a) { // do we have an ellipsoid?
-      var ellipse = constants.Ellipsoid[self.ellps] ? constants.Ellipsoid[self.ellps] : constants.Ellipsoid.WGS84;
-      extend(self, ellipse);
-    }
-    if (self.rf && !self.b) {
-      self.b = (1.0 - 1.0 / self.rf) * self.a;
-    }
-    if (self.rf === 0 || Math.abs(self.a - self.b) < common.EPSLN) {
-      self.sphere = true;
-      self.b = self.a;
-    }
-    self.a2 = self.a * self.a; // used in geocentric
-    self.b2 = self.b * self.b; // used in geocentric
-    self.es = (self.a2 - self.b2) / self.a2; // e ^ 2
-    self.e = Math.sqrt(self.es); // eccentricity
-    if (self.R_A) {
-      self.a *= 1 - self.es * (common.SIXTH + self.es * (common.RA4 + self.es * common.RA6));
-      self.a2 = self.a * self.a;
-      self.b2 = self.b * self.b;
-      self.es = 0;
-    }
-    self.ep2 = (self.a2 - self.b2) / self.b2; // used in geocentric
-    if (!self.k0) {
-      self.k0 = 1.0; //default value
-    }
-    //DGR 2010-11-12: axis
-    if (!self.axis) {
-      self.axis = "enu";
-    }
-
-    self.datum = datum(self);
-  }
-};
-module.exports = proj;
-
-},{"./common":4,"./constants":9,"./datum":11,"./defs":13,"./extend":14,"./projString":18,"./projections":27,"./wkt":47}],3:[function(require,module,exports){
+},{"./deriveConstants":75,"./extend":76,"./parseCode":80,"./projections":82}],46:[function(require,module,exports){
 module.exports = function(crs, denorm, point) {
   var xin = point.x,
     yin = point.y,
@@ -3808,107 +3629,76 @@ module.exports = function(crs, denorm, point) {
   return point;
 };
 
-},{}],4:[function(require,module,exports){
-exports.PI = 3.141592653589793238; //Math.PI;
-exports.HALF_PI = 1.570796326794896619; //Math.PI*0.5;
-exports.TWO_PI = 6.283185307179586477; //Math.PI*2;
-exports.FORTPI = 0.78539816339744833;
-exports.R2D = 57.29577951308232088;
-exports.D2R = 0.01745329251994329577;
-exports.SEC_TO_RAD = 4.84813681109535993589914102357e-6;
-/* SEC_TO_RAD = Pi/180/3600 */
-exports.EPSLN = 1.0e-10;
-exports.MAX_ITER = 20;
-// following constants from geocent.c
-exports.COS_67P5 = 0.38268343236508977;
-/* cosine of 67.5 degrees */
-exports.AD_C = 1.0026000;
-/* Toms region 1 constant */
+},{}],47:[function(require,module,exports){
+var HALF_PI = Math.PI/2;
+var sign = require('./sign');
 
-/* datum_type values */
-exports.PJD_UNKNOWN = 0;
-exports.PJD_3PARAM = 1;
-exports.PJD_7PARAM = 2;
-exports.PJD_GRIDSHIFT = 3;
-exports.PJD_WGS84 = 4; // WGS84 or equivalent
-exports.PJD_NODATUM = 5; // WGS84 or equivalent
-exports.SRS_WGS84_SEMIMAJOR = 6378137; // only used in grid shift transforms
-exports.SRS_WGS84_ESQUARED = 0.006694379990141316; //DGR: 2012-07-29
-
-// ellipoid pj_set_ell.c
-exports.SIXTH = 0.1666666666666666667;
-/* 1/6 */
-exports.RA4 = 0.04722222222222222222;
-/* 17/360 */
-exports.RA6 = 0.02215608465608465608;
-/* 67/3024 */
-exports.RV4 = 0.06944444444444444444;
-/* 5/72 */
-exports.RV6 = 0.04243827160493827160;
-/* 55/1296 */
-
-// Function to compute the constant small m which is the radius of
-//   a parallel of latitude; phi; divided by the semimajor axis.
-// -----------------------------------------------------------------
-exports.msfnz = function(eccent, sinphi, cosphi) {
-  var con = eccent * sinphi;
-  return cosphi / (Math.sqrt(1 - con * con));
+module.exports = function(x) {
+  return (Math.abs(x) < HALF_PI) ? x : (x - (sign(x) * Math.PI));
 };
+},{"./sign":64}],48:[function(require,module,exports){
+var TWO_PI = Math.PI * 2;
+var sign = require('./sign');
 
-// Function to compute the constant small t for use in the forward
-//   computations in the Lambert Conformal Conic and the Polar
-//   Stereographic projections.
-// -----------------------------------------------------------------
-exports.tsfnz = function(eccent, phi, sinphi) {
-  var con = eccent * sinphi;
-  var com = 0.5 * eccent;
-  con = Math.pow(((1 - con) / (1 + con)), com);
-  return (Math.tan(0.5 * (this.HALF_PI - phi)) / con);
+module.exports = function(x) {
+  return (Math.abs(x) < Math.PI) ? x : (x - (sign(x) * TWO_PI));
 };
+},{"./sign":64}],49:[function(require,module,exports){
+module.exports = function(x) {
+  if (Math.abs(x) > 1) {
+    x = (x > 1) ? 1 : -1;
+  }
+  return Math.asin(x);
+};
+},{}],50:[function(require,module,exports){
+module.exports = function(x) {
+  return (1 - 0.25 * x * (1 + x / 16 * (3 + 1.25 * x)));
+};
+},{}],51:[function(require,module,exports){
+module.exports = function(x) {
+  return (0.375 * x * (1 + 0.25 * x * (1 + 0.46875 * x)));
+};
+},{}],52:[function(require,module,exports){
+module.exports = function(x) {
+  return (0.05859375 * x * x * (1 + 0.75 * x));
+};
+},{}],53:[function(require,module,exports){
+module.exports = function(x) {
+  return (x * x * x * (35 / 3072));
+};
+},{}],54:[function(require,module,exports){
+module.exports = function(a, e, sinphi) {
+  var temp = e * sinphi;
+  return a / Math.sqrt(1 - temp * temp);
+};
+},{}],55:[function(require,module,exports){
+module.exports = function(ml, e0, e1, e2, e3) {
+  var phi;
+  var dphi;
 
-// Function to compute the latitude angle; phi2; for the inverse of the
-//   Lambert Conformal Conic and Polar Stereographic projections.
-// ----------------------------------------------------------------
-exports.phi2z = function(eccent, ts) {
-  var eccnth = 0.5 * eccent;
-  var con, dphi;
-  var phi = this.HALF_PI - 2 * Math.atan(ts);
-  for (var i = 0; i <= 15; i++) {
-    con = eccent * Math.sin(phi);
-    dphi = this.HALF_PI - 2 * Math.atan(ts * (Math.pow(((1 - con) / (1 + con)), eccnth))) - phi;
+  phi = ml / e0;
+  for (var i = 0; i < 15; i++) {
+    dphi = (ml - (e0 * phi - e1 * Math.sin(2 * phi) + e2 * Math.sin(4 * phi) - e3 * Math.sin(6 * phi))) / (e0 - 2 * e1 * Math.cos(2 * phi) + 4 * e2 * Math.cos(4 * phi) - 6 * e3 * Math.cos(6 * phi));
     phi += dphi;
     if (Math.abs(dphi) <= 0.0000000001) {
       return phi;
     }
   }
-  //console.log("phi2z has NoConvergence");
-  return -9999;
-};
 
-/* Function to compute constant small q which is the radius of a 
-   parallel of latitude, phi, divided by the semimajor axis. 
-------------------------------------------------------------*/
-exports.qsfnz = function(eccent, sinphi) {
-  var con;
-  if (eccent > 1.0e-7) {
-    con = eccent * sinphi;
-    return ((1 - eccent * eccent) * (sinphi / (1 - con * con) - (0.5 / eccent) * Math.log((1 - con) / (1 + con))));
-  }
-  else {
-    return (2 * sinphi);
-  }
+  //..reportError("IMLFN-CONV:Latitude failed to converge after 15 iterations");
+  return NaN;
 };
+},{}],56:[function(require,module,exports){
+var HALF_PI = Math.PI/2;
 
-/* Function to compute the inverse of qsfnz
-------------------------------------------------------------*/
-exports.iqsfnz = function(eccent, q) {
+module.exports = function(eccent, q) {
   var temp = 1 - (1 - eccent * eccent) / (2 * eccent) * Math.log((1 - eccent) / (1 + eccent));
   if (Math.abs(Math.abs(q) - temp) < 1.0E-6) {
     if (q < 0) {
-      return (-1 * exports.HALF_PI);
+      return (-1 * HALF_PI);
     }
     else {
-      return exports.HALF_PI;
+      return HALF_PI;
     }
   }
   //var phi = 0.5* q/(1-eccent*eccent);
@@ -3931,351 +3721,127 @@ exports.iqsfnz = function(eccent, q) {
   //console.log("IQSFN-CONV:Latitude failed to converge after 30 iterations");
   return NaN;
 };
-
-/* Function to eliminate roundoff errors in asin
-----------------------------------------------*/
-exports.asinz = function(x) {
-  if (Math.abs(x) > 1) {
-    x = (x > 1) ? 1 : -1;
-  }
-  return Math.asin(x);
-};
-
-// following functions from gctpc cproj.c for transverse mercator projections
-exports.e0fn = function(x) {
-  return (1 - 0.25 * x * (1 + x / 16 * (3 + 1.25 * x)));
-};
-exports.e1fn = function(x) {
-  return (0.375 * x * (1 + 0.25 * x * (1 + 0.46875 * x)));
-};
-exports.e2fn = function(x) {
-  return (0.05859375 * x * x * (1 + 0.75 * x));
-};
-exports.e3fn = function(x) {
-  return (x * x * x * (35 / 3072));
-};
-exports.mlfn = function(e0, e1, e2, e3, phi) {
+},{}],57:[function(require,module,exports){
+module.exports = function(e0, e1, e2, e3, phi) {
   return (e0 * phi - e1 * Math.sin(2 * phi) + e2 * Math.sin(4 * phi) - e3 * Math.sin(6 * phi));
 };
-exports.imlfn = function(ml, e0, e1, e2, e3) {
-  var phi;
-  var dphi;
-
-  phi = ml / e0;
-  for (var i = 0; i < 15; i++) {
-    dphi = (ml - (e0 * phi - e1 * Math.sin(2 * phi) + e2 * Math.sin(4 * phi) - e3 * Math.sin(6 * phi))) / (e0 - 2 * e1 * Math.cos(2 * phi) + 4 * e2 * Math.cos(4 * phi) - 6 * e3 * Math.cos(6 * phi));
+},{}],58:[function(require,module,exports){
+module.exports = function(eccent, sinphi, cosphi) {
+  var con = eccent * sinphi;
+  return cosphi / (Math.sqrt(1 - con * con));
+};
+},{}],59:[function(require,module,exports){
+var HALF_PI = Math.PI/2;
+module.exports = function(eccent, ts) {
+  var eccnth = 0.5 * eccent;
+  var con, dphi;
+  var phi = HALF_PI - 2 * Math.atan(ts);
+  for (var i = 0; i <= 15; i++) {
+    con = eccent * Math.sin(phi);
+    dphi = HALF_PI - 2 * Math.atan(ts * (Math.pow(((1 - con) / (1 + con)), eccnth))) - phi;
     phi += dphi;
     if (Math.abs(dphi) <= 0.0000000001) {
       return phi;
     }
   }
-
-  //..reportError("IMLFN-CONV:Latitude failed to converge after 15 iterations");
-  return NaN;
+  //console.log("phi2z has NoConvergence");
+  return -9999;
 };
+},{}],60:[function(require,module,exports){
+var C00 = 1;
+var C02 = 0.25;
+var C04 = 0.046875;
+var C06 = 0.01953125;
+var C08 = 0.01068115234375;
+var C22 = 0.75;
+var C44 = 0.46875;
+var C46 = 0.01302083333333333333;
+var C48 = 0.00712076822916666666;
+var C66 = 0.36458333333333333333;
+var C68 = 0.00569661458333333333;
+var C88 = 0.3076171875;
 
-exports.srat = function(esinp, exp) {
-  return (Math.pow((1 - esinp) / (1 + esinp), exp));
-};
-
-// Function to return the sign of an argument
-exports.sign = function(x) {
-  if (x < 0) {
-    return (-1);
-  }
-  else {
-    return (1);
-  }
-};
-
-// Function to adjust longitude to -180 to 180; input in radians
-exports.adjust_lon = function(x) {
-  x = (Math.abs(x) < this.PI) ? x : (x - (this.sign(x) * this.TWO_PI));
-  return x;
-};
-
-// IGNF - DGR : algorithms used by IGN France
-
-// Function to adjust latitude to -90 to 90; input in radians
-exports.adjust_lat = function(x) {
-  x = (Math.abs(x) < this.HALF_PI) ? x : (x - (this.sign(x) * this.PI));
-  return x;
-};
-
-// Latitude Isometrique - close to tsfnz ...
-exports.latiso = function(eccent, phi, sinphi) {
-  if (Math.abs(phi) > this.HALF_PI) {
-    return Number.NaN;
-  }
-  if (phi === this.HALF_PI) {
-    return Number.POSITIVE_INFINITY;
-  }
-  if (phi === -1 * this.HALF_PI) {
-    return Number.NEGATIVE_INFINITY;
-  }
-
-  var con = eccent * sinphi;
-  return Math.log(Math.tan((this.HALF_PI + phi) / 2)) + eccent * Math.log((1 - con) / (1 + con)) / 2;
-};
-
-exports.fL = function(x, L) {
-  return 2 * Math.atan(x * Math.exp(L)) - this.HALF_PI;
-};
-
-// Inverse Latitude Isometrique - close to ph2z
-exports.invlatiso = function(eccent, ts) {
-  var phi = this.fL(1, ts);
-  var Iphi = 0;
-  var con = 0;
-  do {
-    Iphi = phi;
-    con = eccent * Math.sin(Iphi);
-    phi = this.fL(Math.exp(eccent * Math.log((1 + con) / (1 - con)) / 2), ts);
-  } while (Math.abs(phi - Iphi) > 1.0e-12);
-  return phi;
-};
-
-// Needed for Gauss Schreiber
-// Original:  Denis Makarov (info@binarythings.com)
-// Web Site:  http://www.binarythings.com
-exports.sinh = function(x) {
-  var r = Math.exp(x);
-  r = (r - 1 / r) / 2;
-  return r;
-};
-
-exports.cosh = function(x) {
-  var r = Math.exp(x);
-  r = (r + 1 / r) / 2;
-  return r;
-};
-
-exports.tanh = function(x) {
-  var r = Math.exp(x);
-  r = (r - 1 / r) / (r + 1 / r);
-  return r;
-};
-
-exports.asinh = function(x) {
-  var s = (x >= 0 ? 1 : -1);
-  return s * (Math.log(Math.abs(x) + Math.sqrt(x * x + 1)));
-};
-
-exports.acosh = function(x) {
-  return 2 * Math.log(Math.sqrt((x + 1) / 2) + Math.sqrt((x - 1) / 2));
-};
-
-exports.atanh = function(x) {
-  return Math.log((x - 1) / (x + 1)) / 2;
-};
-
-// Grande Normale
-exports.gN = function(a, e, sinphi) {
-  var temp = e * sinphi;
-  return a / Math.sqrt(1 - temp * temp);
-};
-
-//code from the PROJ.4 pj_mlfn.c file;  this may be useful for other projections
-exports.pj_enfn = function(es) {
+module.exports = function(es) {
   var en = [];
-  en[0] = this.C00 - es * (this.C02 + es * (this.C04 + es * (this.C06 + es * this.C08)));
-  en[1] = es * (this.C22 - es * (this.C04 + es * (this.C06 + es * this.C08)));
+  en[0] = C00 - es * (C02 + es * (C04 + es * (C06 + es * C08)));
+  en[1] = es * (C22 - es * (C04 + es * (C06 + es * C08)));
   var t = es * es;
-  en[2] = t * (this.C44 - es * (this.C46 + es * this.C48));
+  en[2] = t * (C44 - es * (C46 + es * C48));
   t *= es;
-  en[3] = t * (this.C66 - es * this.C68);
-  en[4] = t * es * this.C88;
+  en[3] = t * (C66 - es * C68);
+  en[4] = t * es * C88;
   return en;
 };
-
-exports.pj_mlfn = function(phi, sphi, cphi, en) {
-  cphi *= sphi;
-  sphi *= sphi;
-  return (en[0] * phi - cphi * (en[1] + sphi * (en[2] + sphi * (en[3] + sphi * en[4]))));
-};
-
-exports.pj_inv_mlfn = function(arg, es, en) {
+},{}],61:[function(require,module,exports){
+var pj_mlfn = require("./pj_mlfn");
+var EPSLN = 1.0e-10;
+var MAX_ITER = 20;
+module.exports = function(arg, es, en) {
   var k = 1 / (1 - es);
   var phi = arg;
-  for (var i = exports.MAX_ITER; i; --i) { /* rarely goes over 2 iterations */
+  for (var i = MAX_ITER; i; --i) { /* rarely goes over 2 iterations */
     var s = Math.sin(phi);
     var t = 1 - es * s * s;
     //t = this.pj_mlfn(phi, s, Math.cos(phi), en) - arg;
     //phi -= t * (t * Math.sqrt(t)) * k;
-    t = (this.pj_mlfn(phi, s, Math.cos(phi), en) - arg) * (t * Math.sqrt(t)) * k;
+    t = (pj_mlfn(phi, s, Math.cos(phi), en) - arg) * (t * Math.sqrt(t)) * k;
     phi -= t;
-    if (Math.abs(t) < exports.EPSLN) {
+    if (Math.abs(t) < EPSLN) {
       return phi;
     }
   }
   //..reportError("cass:pj_inv_mlfn: Convergence error");
   return phi;
 };
-
-/**
- * Determine correction values
- * source: nad_intr.c (DGR: 2012-07-29)
- */
-exports.nad_intr = function(pin, ct) {
-  // force computation by decreasing by 1e-7 to be as closed as possible
-  // from computation under C:C++ by leveraging rounding problems ...
-  var t = {
-    x: (pin.x - 1e-7) / ct.del[0],
-    y: (pin.y - 1e-7) / ct.del[1]
-  };
-  var indx = {
-    x: Math.floor(t.x),
-    y: Math.floor(t.y)
-  };
-  var frct = {
-    x: t.x - 1 * indx.x,
-    y: t.y - 1 * indx.y
-  };
-  var val = {
-    x: Number.NaN,
-    y: Number.NaN
-  };
-  var inx;
-  if (indx.x < 0) {
-    if (!(indx.x === -1 && frct.x > 0.99999999999)) {
-      return val;
-    }
-    indx.x++;
-    frct.x = 0;
-  }
-  else {
-    inx = indx.x + 1;
-    if (inx >= ct.lim[0]) {
-      if (!(inx === ct.lim[0] && frct.x < 1e-11)) {
-        return val;
-      }
-      indx.x--;
-      frct.x = 1;
-    }
-  }
-  if (indx.y < 0) {
-    if (!(indx.y === -1 && frct.y > 0.99999999999)) {
-      return val;
-    }
-    indx.y++;
-    frct.y = 0;
-  }
-  else {
-    inx = indx.y + 1;
-    if (inx >= ct.lim[1]) {
-      if (!(inx === ct.lim[1] && frct.y < 1e-11)) {
-        return val;
-      }
-      indx.y++;
-      frct.y = 1;
-    }
-  }
-  inx = (indx.y * ct.lim[0]) + indx.x;
-  var f00 = {
-    x: ct.cvs[inx][0],
-    y: ct.cvs[inx][1]
-  };
-  inx++;
-  var f10 = {
-    x: ct.cvs[inx][0],
-    y: ct.cvs[inx][1]
-  };
-  inx += ct.lim[0];
-  var f11 = {
-    x: ct.cvs[inx][0],
-    y: ct.cvs[inx][1]
-  };
-  inx--;
-  var f01 = {
-    x: ct.cvs[inx][0],
-    y: ct.cvs[inx][1]
-  };
-  var m11 = frct.x * frct.y,
-    m10 = frct.x * (1 - frct.y),
-    m00 = (1 - frct.x) * (1 - frct.y),
-    m01 = (1 - frct.x) * frct.y;
-  val.x = (m00 * f00.x + m10 * f10.x + m01 * f01.x + m11 * f11.x);
-  val.y = (m00 * f00.y + m10 * f10.y + m01 * f01.y + m11 * f11.y);
-  return val;
+},{"./pj_mlfn":62}],62:[function(require,module,exports){
+module.exports = function(phi, sphi, cphi, en) {
+  cphi *= sphi;
+  sphi *= sphi;
+  return (en[0] * phi - cphi * (en[1] + sphi * (en[2] + sphi * (en[3] + sphi * en[4]))));
 };
-
-/**
- * Correct value
- * source: nad_cvt.c (DGR: 2012-07-29)
- */
-exports.nad_cvt = function(pin, inverse, ct) {
-  var val = {
-    "x": Number.NaN,
-    "y": Number.NaN
-  };
-  if (isNaN(pin.x)) {
-    return val;
-  }
-  var tb = {
-    "x": pin.x,
-    "y": pin.y
-  };
-  tb.x -= ct.ll[0];
-  tb.y -= ct.ll[1];
-  tb.x = exports.adjust_lon(tb.x - exports.PI) + exports.PI;
-  var t = exports.nad_intr(tb, ct);
-  if (inverse) {
-    if (isNaN(t.x)) {
-      return val;
-    }
-    t.x = tb.x + t.x;
-    t.y = tb.y - t.y;
-    var i = 9,
-      tol = 1e-12;
-    var dif, del;
-    do {
-      del = exports.nad_intr(t, ct);
-      if (isNaN(del.x)) {
-        this.reportError("Inverse grid shift iteration failed, presumably at grid edge.  Using first approximation.");
-        break;
-      }
-      dif = {
-        "x": t.x - del.x - tb.x,
-        "y": t.y + del.y - tb.y
-      };
-      t.x -= dif.x;
-      t.y -= dif.y;
-    } while (i-- && Math.abs(dif.x) > tol && Math.abs(dif.y) > tol);
-    if (i < 0) {
-      this.reportError("Inverse grid shift iterator failed to converge.");
-      return val;
-    }
-    val.x = exports.adjust_lon(t.x + ct.ll[0]);
-    val.y = t.y + ct.ll[1];
+},{}],63:[function(require,module,exports){
+module.exports = function(eccent, sinphi) {
+  var con;
+  if (eccent > 1.0e-7) {
+    con = eccent * sinphi;
+    return ((1 - eccent * eccent) * (sinphi / (1 - con * con) - (0.5 / eccent) * Math.log((1 - con) / (1 + con))));
   }
   else {
-    if (!isNaN(t.x)) {
-      val.x = pin.x - t.x;
-      val.y = pin.y + t.y;
-    }
+    return (2 * sinphi);
   }
-  return val;
 };
+},{}],64:[function(require,module,exports){
+module.exports = function(x) {
+  return x<0 ? -1 : 1;
+};
+},{}],65:[function(require,module,exports){
+module.exports = function(esinp, exp) {
+  return (Math.pow((1 - esinp) / (1 + esinp), exp));
+};
+},{}],66:[function(require,module,exports){
+module.exports = function (array){
+  var out = {
+    x: array[0],
+    y: array[1]
+  };
+  if (array.length>2) {
+    out.z = array[2];
+  }
+  if (array.length>3) {
+    out.m = array[3];
+  }
+  return out;
+};
+},{}],67:[function(require,module,exports){
+var HALF_PI = Math.PI/2;
 
-/* meridinal distance for ellipsoid and inverse
- **    8th degree - accurate to < 1e-5 meters when used in conjuction
- **		with typical major axis values.
- **	Inverse determines phi to EPS (1e-11) radians, about 1e-6 seconds.
- */
-exports.C00 = 1;
-exports.C02 = 0.25;
-exports.C04 = 0.046875;
-exports.C06 = 0.01953125;
-exports.C08 = 0.01068115234375;
-exports.C22 = 0.75;
-exports.C44 = 0.46875;
-exports.C46 = 0.01302083333333333333;
-exports.C48 = 0.00712076822916666666;
-exports.C66 = 0.36458333333333333333;
-exports.C68 = 0.00569661458333333333;
-exports.C88 = 0.3076171875;
-
-},{}],5:[function(require,module,exports){
+module.exports = function(eccent, phi, sinphi) {
+  var con = eccent * sinphi;
+  var com = 0.5 * eccent;
+  con = Math.pow(((1 - con) / (1 + con)), com);
+  return (Math.tan(0.5 * (HALF_PI - phi)) / con);
+};
+},{}],68:[function(require,module,exports){
 exports.wgs84 = {
   towgs84: "0,0,0",
   ellipse: "WGS84",
@@ -4351,7 +3917,12 @@ exports.gunung_segara = {
   ellipse: 'bessel',
   datumName: 'Gunung Segara Jakarta'
 };
-},{}],6:[function(require,module,exports){
+exports.rnb72 = {
+  towgs84: "106.869,-52.2978,103.724,-0.33657,0.456955,-1.84218,1",
+  ellipse: "intl",
+  datumName: "Reseau National Belge 1972"
+};
+},{}],69:[function(require,module,exports){
 exports.MERIT = {
   a: 6378137.0,
   rf: 298.257,
@@ -4567,7 +4138,7 @@ exports.sphere = {
   b: 6370997.0,
   ellipseName: "Normal Sphere (r=6370997)"
 };
-},{}],7:[function(require,module,exports){
+},{}],70:[function(require,module,exports){
 exports.greenwich = 0.0; //"0dE",
 exports.lisbon = -9.131906111111; //"9d07'54.862\"W",
 exports.paris = 2.337229166667; //"2d20'14.025\"E",
@@ -4581,44 +4152,7 @@ exports.brussels = 4.367975; //"4d22'4.71\"E",
 exports.stockholm = 18.058277777778; //"18d3'29.8\"E",
 exports.athens = 23.7163375; //"23d42'58.815\"E",
 exports.oslo = 10.722916666667; //"10d43'22.5\"E"
-},{}],8:[function(require,module,exports){
-// Based on . CTABLE  structure :
-  // FIXME: better to have array instead of object holding longitudes, latitudes members
-  //        In the former case, one has to document index 0 is longitude and
-  //        1 is latitude ...
-  //        In the later case, grid object gets bigger !!!!
-  //        Solution 1 is chosen based on pj_gridinfo.c
-exports.null = { // name of grid's file
-  "ll": [-3.14159265, - 1.57079633], // lower-left coordinates in radians (longitude, latitude):
-  "del": [3.14159265, 1.57079633], // cell's size in radians (longitude, latitude):
-  "lim": [3, 3], // number of nodes in longitude, latitude (including edges):
-  "count": 9, // total number of nodes
-  "cvs": [ // shifts : in ntv2 reverse order : lon, lat in radians ...
-    [0.0, 0.0],
-    [0.0, 0.0],
-    [0.0, 0.0], // for (lon= 0; lon<lim[0]; lon++) {
-    [0.0, 0.0],
-    [0.0, 0.0],
-    [0.0, 0.0], //   for (lat= 0; lat<lim[1]; lat++) { p= cvs[lat*lim[0]+lon]; }
-    [0.0, 0.0],
-    [0.0, 0.0],
-    [0.0, 0.0] // }
-  ]
-};
-},{}],9:[function(require,module,exports){
-exports.PrimeMeridian = require('./PrimeMeridian');
-
-exports.Ellipsoid = require('./Ellipsoid');
-
-exports.Datum = require('./Datum');
-
-//..WGS84 = Proj('WGS84');
-exports.Datum.OSB36 = exports.Datum.OSGB36; //as returned from spatialreference.org
-
-exports.grids = require('./grids');
-
-},{"./Datum":5,"./Ellipsoid":6,"./PrimeMeridian":7,"./grids":8}],10:[function(require,module,exports){
-var point = require('./Point');
+},{}],71:[function(require,module,exports){
 var proj = require('./Proj');
 var transform = require('./transform');
 var wgs84 = proj('WGS84');
@@ -4626,7 +4160,7 @@ var wgs84 = proj('WGS84');
 function transformer(from, to, coords) {
   var transformedArray;
   if (Array.isArray(coords)) {
-    transformedArray = transform(from, to, point(coords));
+    transformedArray = transform(from, to, coords);
     if (coords.length === 3) {
       return [transformedArray.x, transformedArray.y, transformedArray.z];
     }
@@ -4648,7 +4182,7 @@ function checkProj(item) {
   }
   return proj(item);
 }
-module.exports = function(fromProj, toProj, coord) {
+function proj4(fromProj, toProj, coord) {
   fromProj = checkProj(fromProj);
   var single = false;
   var obj;
@@ -4681,46 +4215,55 @@ module.exports = function(fromProj, toProj, coord) {
     }
     return obj;
   }
-};
-},{"./Point":1,"./Proj":2,"./transform":45}],11:[function(require,module,exports){
-var common = require('./common');
+}
+module.exports = proj4;
+},{"./Proj":45,"./transform":108}],72:[function(require,module,exports){
+var HALF_PI = Math.PI/2;
+var PJD_3PARAM = 1;
+var PJD_7PARAM = 2;
+var PJD_GRIDSHIFT = 3;
+var PJD_WGS84 = 4; // WGS84 or equivalent
+var PJD_NODATUM = 5; // WGS84 or equivalent
+var SEC_TO_RAD = 4.84813681109535993589914102357e-6;
+var AD_C = 1.0026000;
+var COS_67P5 = 0.38268343236508977;
 var datum = function(proj) {
   if (!(this instanceof datum)) {
     return new datum(proj);
   }
-  this.datum_type = common.PJD_WGS84; //default setting
+  this.datum_type = PJD_WGS84; //default setting
   if (!proj) {
     return;
   }
   if (proj.datumCode && proj.datumCode === 'none') {
-    this.datum_type = common.PJD_NODATUM;
+    this.datum_type = PJD_NODATUM;
   }
   if (proj.datum_params) {
     for (var i = 0; i < proj.datum_params.length; i++) {
       proj.datum_params[i] = parseFloat(proj.datum_params[i]);
     }
     if (proj.datum_params[0] !== 0 || proj.datum_params[1] !== 0 || proj.datum_params[2] !== 0) {
-      this.datum_type = common.PJD_3PARAM;
+      this.datum_type = PJD_3PARAM;
     }
     if (proj.datum_params.length > 3) {
       if (proj.datum_params[3] !== 0 || proj.datum_params[4] !== 0 || proj.datum_params[5] !== 0 || proj.datum_params[6] !== 0) {
-        this.datum_type = common.PJD_7PARAM;
-        proj.datum_params[3] *= common.SEC_TO_RAD;
-        proj.datum_params[4] *= common.SEC_TO_RAD;
-        proj.datum_params[5] *= common.SEC_TO_RAD;
+        this.datum_type = PJD_7PARAM;
+        proj.datum_params[3] *= SEC_TO_RAD;
+        proj.datum_params[4] *= SEC_TO_RAD;
+        proj.datum_params[5] *= SEC_TO_RAD;
         proj.datum_params[6] = (proj.datum_params[6] / 1000000.0) + 1.0;
       }
     }
   }
   // DGR 2011-03-21 : nadgrids support
-  this.datum_type = proj.grids ? common.PJD_GRIDSHIFT : this.datum_type;
+  this.datum_type = proj.grids ? PJD_GRIDSHIFT : this.datum_type;
 
   this.a = proj.a; //datum object also uses these values
   this.b = proj.b;
   this.es = proj.es;
   this.ep2 = proj.ep2;
   this.datum_params = proj.datum_params;
-  if (this.datum_type === common.PJD_GRIDSHIFT) {
+  if (this.datum_type === PJD_GRIDSHIFT) {
     this.grids = proj.grids;
   }
 };
@@ -4739,13 +4282,13 @@ datum.prototype = {
       // are considered identical
       return false;
     }
-    else if (this.datum_type === common.PJD_3PARAM) {
+    else if (this.datum_type === PJD_3PARAM) {
       return (this.datum_params[0] === dest.datum_params[0] && this.datum_params[1] === dest.datum_params[1] && this.datum_params[2] === dest.datum_params[2]);
     }
-    else if (this.datum_type === common.PJD_7PARAM) {
+    else if (this.datum_type === PJD_7PARAM) {
       return (this.datum_params[0] === dest.datum_params[0] && this.datum_params[1] === dest.datum_params[1] && this.datum_params[2] === dest.datum_params[2] && this.datum_params[3] === dest.datum_params[3] && this.datum_params[4] === dest.datum_params[4] && this.datum_params[5] === dest.datum_params[5] && this.datum_params[6] === dest.datum_params[6]);
     }
-    else if (this.datum_type === common.PJD_GRIDSHIFT || dest.datum_type === common.PJD_GRIDSHIFT) {
+    else if (this.datum_type === PJD_GRIDSHIFT || dest.datum_type === PJD_GRIDSHIFT) {
       //alert("ERROR: Grid shift transformations are not implemented.");
       //return false
       //DGR 2012-07-29 lazy ...
@@ -4788,20 +4331,20 @@ datum.prototype = {
      ** range as it may just be a rounding issue.  Also removed longitude
      ** test, it should be wrapped by Math.cos() and Math.sin().  NFW for PROJ.4, Sep/2001.
      */
-    if (Latitude < -common.HALF_PI && Latitude > -1.001 * common.HALF_PI) {
-      Latitude = -common.HALF_PI;
+    if (Latitude < -HALF_PI && Latitude > -1.001 * HALF_PI) {
+      Latitude = -HALF_PI;
     }
-    else if (Latitude > common.HALF_PI && Latitude < 1.001 * common.HALF_PI) {
-      Latitude = common.HALF_PI;
+    else if (Latitude > HALF_PI && Latitude < 1.001 * HALF_PI) {
+      Latitude = HALF_PI;
     }
-    else if ((Latitude < -common.HALF_PI) || (Latitude > common.HALF_PI)) {
+    else if ((Latitude < -HALF_PI) || (Latitude > HALF_PI)) {
       /* Latitude out of range */
       //..reportError('geocent:lat out of range:' + Latitude);
       return null;
     }
 
-    if (Longitude > common.PI) {
-      Longitude -= (2 * common.PI);
+    if (Longitude > Math.PI) {
+      Longitude -= (2 * Math.PI);
     }
     Sin_Lat = Math.sin(Latitude);
     Cos_Lat = Math.cos(Latitude);
@@ -4861,7 +4404,7 @@ datum.prototype = {
       /*  if (X,Y,Z)=(0.,0.,0.) then Height becomes semi-minor axis
        *  of ellipsoid (=center of mass), Latitude becomes PI/2 */
       if (RR / this.a < genau) {
-        Latitude = common.HALF_PI;
+        Latitude = HALF_PI;
         Height = -this.b;
         return;
       }
@@ -4953,22 +4496,22 @@ datum.prototype = {
     }
     else {
       if (Y > 0) {
-        Longitude = common.HALF_PI;
+        Longitude = HALF_PI;
       }
       else if (Y < 0) {
-        Longitude = -common.HALF_PI;
+        Longitude = -HALF_PI;
       }
       else {
         At_Pole = true;
         Longitude = 0.0;
         if (Z > 0.0) { /* north pole */
-          Latitude = common.HALF_PI;
+          Latitude = HALF_PI;
         }
         else if (Z < 0.0) { /* south pole */
-          Latitude = -common.HALF_PI;
+          Latitude = -HALF_PI;
         }
         else { /* center of earth */
-          Latitude = common.HALF_PI;
+          Latitude = HALF_PI;
           Height = -this.b;
           return;
         }
@@ -4976,7 +4519,7 @@ datum.prototype = {
     }
     W2 = X * X + Y * Y;
     W = Math.sqrt(W2);
-    T0 = Z * common.AD_C;
+    T0 = Z * AD_C;
     S0 = Math.sqrt(T0 * T0 + W2);
     Sin_B0 = T0 / S0;
     Cos_B0 = W / S0;
@@ -4987,10 +4530,10 @@ datum.prototype = {
     Sin_p1 = T1 / S1;
     Cos_p1 = Sum / S1;
     Rn = this.a / Math.sqrt(1.0 - this.es * Sin_p1 * Sin_p1);
-    if (Cos_p1 >= common.COS_67P5) {
+    if (Cos_p1 >= COS_67P5) {
       Height = W / Cos_p1 - Rn;
     }
-    else if (Cos_p1 <= -common.COS_67P5) {
+    else if (Cos_p1 <= -COS_67P5) {
       Height = W / -Cos_p1 - Rn;
     }
     else {
@@ -5011,7 +4554,7 @@ datum.prototype = {
   //  p = point to transform in geocentric coordinates (x,y,z)
   geocentric_to_wgs84: function(p) {
 
-    if (this.datum_type === common.PJD_3PARAM) {
+    if (this.datum_type === PJD_3PARAM) {
       // if( x[io] === HUGE_VAL )
       //    continue;
       p.x += this.datum_params[0];
@@ -5019,7 +4562,7 @@ datum.prototype = {
       p.z += this.datum_params[2];
 
     }
-    else if (this.datum_type === common.PJD_7PARAM) {
+    else if (this.datum_type === PJD_7PARAM) {
       var Dx_BF = this.datum_params[0];
       var Dy_BF = this.datum_params[1];
       var Dz_BF = this.datum_params[2];
@@ -5044,7 +4587,7 @@ datum.prototype = {
   //  point to transform in geocentric coordinates (x,y,z)
   geocentric_from_wgs84: function(p) {
 
-    if (this.datum_type === common.PJD_3PARAM) {
+    if (this.datum_type === PJD_3PARAM) {
       //if( x[io] === HUGE_VAL )
       //    continue;
       p.x -= this.datum_params[0];
@@ -5052,7 +4595,7 @@ datum.prototype = {
       p.z -= this.datum_params[2];
 
     }
-    else if (this.datum_type === common.PJD_7PARAM) {
+    else if (this.datum_type === PJD_7PARAM) {
       var Dx_BF = this.datum_params[0];
       var Dy_BF = this.datum_params[1];
       var Dz_BF = this.datum_params[2];
@@ -5080,13 +4623,18 @@ datum.prototype = {
 */
 module.exports = datum;
 
-},{"./common":4}],12:[function(require,module,exports){
-var common = require('./common');
+},{}],73:[function(require,module,exports){
+var PJD_3PARAM = 1;
+var PJD_7PARAM = 2;
+var PJD_GRIDSHIFT = 3;
+var PJD_NODATUM = 5; // WGS84 or equivalent
+var SRS_WGS84_SEMIMAJOR = 6378137; // only used in grid shift transforms
+var SRS_WGS84_ESQUARED = 0.006694379990141316; //DGR: 2012-07-29
 module.exports = function(source, dest, point) {
   var wp, i, l;
 
   function checkParams(fallback) {
-    return (fallback === common.PJD_3PARAM || fallback === common.PJD_7PARAM);
+    return (fallback === PJD_3PARAM || fallback === PJD_7PARAM);
   }
   // Short cut if the datums are identical.
   if (source.compare_datums(dest)) {
@@ -5096,7 +4644,7 @@ module.exports = function(source, dest, point) {
   }
 
   // Explicitly skip datum transform by setting 'datum=none' as parameter for either source or dest
-  if (source.datum_type === common.PJD_NODATUM || dest.datum_type === common.PJD_NODATUM) {
+  if (source.datum_type === PJD_NODATUM || dest.datum_type === PJD_NODATUM) {
     return point;
   }
 
@@ -5109,10 +4657,10 @@ module.exports = function(source, dest, point) {
 
   var fallback = source.datum_type;
   // If this datum requires grid shifts, then apply it to geodetic coordinates.
-  if (fallback === common.PJD_GRIDSHIFT) {
+  if (fallback === PJD_GRIDSHIFT) {
     if (this.apply_gridshift(source, 0, point) === 0) {
-      source.a = common.SRS_WGS84_SEMIMAJOR;
-      source.es = common.SRS_WGS84_ESQUARED;
+      source.a = SRS_WGS84_SEMIMAJOR;
+      source.es = SRS_WGS84_ESQUARED;
     }
     else {
       // try 3 or 7 params transformation or nothing ?
@@ -5131,16 +4679,16 @@ module.exports = function(source, dest, point) {
         return point;
       }
       if (source.datum_params.length > 3) {
-        fallback = common.PJD_7PARAM;
+        fallback = PJD_7PARAM;
       }
       else {
-        fallback = common.PJD_3PARAM;
+        fallback = PJD_3PARAM;
       }
     }
   }
-  if (dest.datum_type === common.PJD_GRIDSHIFT) {
-    dest.a = common.SRS_WGS84_SEMIMAJOR;
-    dest.es = common.SRS_WGS84_ESQUARED;
+  if (dest.datum_type === PJD_GRIDSHIFT) {
+    dest.a = SRS_WGS84_SEMIMAJOR;
+    dest.es = SRS_WGS84_ESQUARED;
   }
   // Do we need to go through geocentric coordinates?
   if (source.es !== dest.es || source.a !== dest.a || checkParams(fallback) || checkParams(dest.datum_type)) {
@@ -5162,7 +4710,7 @@ module.exports = function(source, dest, point) {
     // CHECK_RETURN;
   }
   // Apply grid shift to destination if required
-  if (dest.datum_type === common.PJD_GRIDSHIFT) {
+  if (dest.datum_type === PJD_GRIDSHIFT) {
     this.apply_gridshift(dest, 1, point);
     // CHECK_RETURN;
   }
@@ -5176,7 +4724,7 @@ module.exports = function(source, dest, point) {
 };
 
 
-},{"./common":4}],13:[function(require,module,exports){
+},{}],74:[function(require,module,exports){
 var globals = require('./global');
 var parseProj = require('./projString');
 var wkt = require('./wkt');
@@ -5226,7 +4774,62 @@ function defs(name) {
 globals(defs);
 module.exports = defs;
 
-},{"./global":15,"./projString":18,"./wkt":47}],14:[function(require,module,exports){
+},{"./global":77,"./projString":81,"./wkt":109}],75:[function(require,module,exports){
+var Datum = require('./constants/Datum');
+var Ellipsoid = require('./constants/Ellipsoid');
+var extend = require('./extend');
+var datum = require('./datum');
+var EPSLN = 1.0e-10;
+// ellipoid pj_set_ell.c
+var SIXTH = 0.1666666666666666667;
+/* 1/6 */
+var RA4 = 0.04722222222222222222;
+/* 17/360 */
+var RA6 = 0.02215608465608465608;
+module.exports = function(json) {
+  // DGR 2011-03-20 : nagrids -> nadgrids
+  if (json.datumCode && json.datumCode !== 'none') {
+    var datumDef = Datum[json.datumCode];
+    if (datumDef) {
+      json.datum_params = datumDef.towgs84 ? datumDef.towgs84.split(',') : null;
+      json.ellps = datumDef.ellipse;
+      json.datumName = datumDef.datumName ? datumDef.datumName : json.datumCode;
+    }
+  }
+  if (!json.a) { // do we have an ellipsoid?
+    var ellipse = Ellipsoid[json.ellps] ? Ellipsoid[json.ellps] : Ellipsoid.WGS84;
+    extend(json, ellipse);
+  }
+  if (json.rf && !json.b) {
+    json.b = (1.0 - 1.0 / json.rf) * json.a;
+  }
+  if (json.rf === 0 || Math.abs(json.a - json.b) < EPSLN) {
+    json.sphere = true;
+    json.b = json.a;
+  }
+  json.a2 = json.a * json.a; // used in geocentric
+  json.b2 = json.b * json.b; // used in geocentric
+  json.es = (json.a2 - json.b2) / json.a2; // e ^ 2
+  json.e = Math.sqrt(json.es); // eccentricity
+  if (json.R_A) {
+    json.a *= 1 - json.es * (SIXTH + json.es * (RA4 + json.es * RA6));
+    json.a2 = json.a * json.a;
+    json.b2 = json.b * json.b;
+    json.es = 0;
+  }
+  json.ep2 = (json.a2 - json.b2) / json.b2; // used in geocentric
+  if (!json.k0) {
+    json.k0 = 1.0; //default value
+  }
+  //DGR 2010-11-12: axis
+  if (!json.axis) {
+    json.axis = "enu";
+  }
+
+  json.datum = datum(json);
+  return json;
+};
+},{"./constants/Datum":68,"./constants/Ellipsoid":69,"./datum":72,"./extend":76}],76:[function(require,module,exports){
 module.exports = function(destination, source) {
   destination = destination || {};
   var value, property;
@@ -5242,7 +4845,7 @@ module.exports = function(destination, source) {
   return destination;
 };
 
-},{}],15:[function(require,module,exports){
+},{}],77:[function(require,module,exports){
 module.exports = function(defs) {
   defs('WGS84', "+title=WGS 84 (long/lat) +proj=longlat +ellps=WGS84 +datum=WGS84 +units=degrees");
   defs('EPSG:4326', "+title=WGS 84 (long/lat) +proj=longlat +ellps=WGS84 +datum=WGS84 +units=degrees");
@@ -5255,188 +4858,3298 @@ module.exports = function(defs) {
   defs['EPSG:102113'] = defs['EPSG:3857'];
 };
 
-},{}],16:[function(require,module,exports){
+},{}],78:[function(require,module,exports){
+var projs = [
+  require('./projections/tmerc'),
+  require('./projections/utm'),
+  require('./projections/sterea'),
+  require('./projections/stere'),
+  require('./projections/somerc'),
+  require('./projections/omerc'),
+  require('./projections/lcc'),
+  require('./projections/krovak'),
+  require('./projections/cass'),
+  require('./projections/laea'),
+  require('./projections/aea'),
+  require('./projections/gnom'),
+  require('./projections/cea'),
+  require('./projections/eqc'),
+  require('./projections/poly'),
+  require('./projections/nzmg'),
+  require('./projections/mill'),
+  require('./projections/sinu'),
+  require('./projections/moll'),
+  require('./projections/eqdc'),
+  require('./projections/vandg'),
+  require('./projections/aeqd')
+];
+module.exports = function(proj4){
+  projs.forEach(function(proj){
+    proj4.Proj.projections.add(proj);
+  });
+};
+},{"./projections/aea":83,"./projections/aeqd":84,"./projections/cass":85,"./projections/cea":86,"./projections/eqc":87,"./projections/eqdc":88,"./projections/gnom":90,"./projections/krovak":91,"./projections/laea":92,"./projections/lcc":93,"./projections/mill":96,"./projections/moll":97,"./projections/nzmg":98,"./projections/omerc":99,"./projections/poly":100,"./projections/sinu":101,"./projections/somerc":102,"./projections/stere":103,"./projections/sterea":104,"./projections/tmerc":105,"./projections/utm":106,"./projections/vandg":107}],79:[function(require,module,exports){
 var proj4 = require('./core');
 proj4.defaultDatum = 'WGS84'; //default datum
 proj4.Proj = require('./Proj');
 proj4.WGS84 = new proj4.Proj('WGS84');
 proj4.Point = require('./Point');
+proj4.toPoint = require("./common/toPoint");
 proj4.defs = require('./defs');
 proj4.transform = require('./transform');
-proj4.mgrs = require('./mgrs');
-proj4.version = require('./version');
+proj4.mgrs = require('mgrs');
+proj4.version = require('../package.json').version;
+require('./includedProjections')(proj4);
 module.exports = proj4;
-},{"./Point":1,"./Proj":2,"./core":10,"./defs":13,"./mgrs":17,"./transform":45,"./version":46}],17:[function(require,module,exports){
+},{"../package.json":111,"./Point":44,"./Proj":45,"./common/toPoint":66,"./core":71,"./defs":74,"./includedProjections":78,"./transform":108,"mgrs":110}],80:[function(require,module,exports){
+var defs = require('./defs');
+var wkt = require('./wkt');
+var projStr = require('./projString');
+function testObj(code){
+  return typeof code === 'string';
+}
+function testDef(code){
+  return code in defs;
+}
+function testWKT(code){
+  var codeWords = ['GEOGCS','GEOCCS','PROJCS','LOCAL_CS'];
+  return codeWords.reduce(function(a,b){
+    return a+1+code.indexOf(b);
+  },0);
+}
+function testProj(code){
+  return code[0] === '+';
+}
+function parse(code){
+  if (testObj(code)) {
+    //check to see if this is a WKT string
+    if (testDef(code)) {
+      return defs[code];
+    }
+    else if (testWKT(code)) {
+      return wkt(code);
+    }
+    else if (testProj(code)) {
+      return projStr(code);
+    }
+  }else{
+    return code;
+  }
+}
+
+module.exports = parse;
+},{"./defs":74,"./projString":81,"./wkt":109}],81:[function(require,module,exports){
+var D2R = 0.01745329251994329577;
+var PrimeMeridian = require('./constants/PrimeMeridian');
+module.exports = function(defData) {
+  var self = {};
+
+  var paramObj = {};
+  defData.split("+").map(function(v) {
+    return v.trim();
+  }).filter(function(a) {
+    return a;
+  }).forEach(function(a) {
+    var split = a.split("=");
+    split.push(true);
+    paramObj[split[0].toLowerCase()] = split[1];
+  });
+  var paramName, paramVal, paramOutname;
+  var params = {
+    proj: 'projName',
+    datum: 'datumCode',
+    rf: function(v) {
+      self.rf = parseFloat(v, 10);
+    },
+    lat_0: function(v) {
+      self.lat0 = v * D2R;
+    },
+    lat_1: function(v) {
+      self.lat1 = v * D2R;
+    },
+    lat_2: function(v) {
+      self.lat2 = v * D2R;
+    },
+    lat_ts: function(v) {
+      self.lat_ts = v * D2R;
+    },
+    lon_0: function(v) {
+      self.long0 = v * D2R;
+    },
+    lon_1: function(v) {
+      self.long1 = v * D2R;
+    },
+    lon_2: function(v) {
+      self.long2 = v * D2R;
+    },
+    alpha: function(v) {
+      self.alpha = parseFloat(v) * D2R;
+    },
+    lonc: function(v) {
+      self.longc = v * D2R;
+    },
+    x_0: function(v) {
+      self.x0 = parseFloat(v, 10);
+    },
+    y_0: function(v) {
+      self.y0 = parseFloat(v, 10);
+    },
+    k_0: function(v) {
+      self.k0 = parseFloat(v, 10);
+    },
+    k: function(v) {
+      self.k0 = parseFloat(v, 10);
+    },
+    r_a: function() {
+      self.R_A = true;
+    },
+    zone: function(v) {
+      self.zone = parseInt(v, 10);
+    },
+    south: function() {
+      self.utmSouth = true;
+    },
+    towgs84: function(v) {
+      self.datum_params = v.split(",").map(function(a) {
+        return parseFloat(a, 10);
+      });
+    },
+    to_meter: function(v) {
+      self.to_meter = parseFloat(v, 10);
+    },
+    from_greenwich: function(v) {
+      self.from_greenwich = v * D2R;
+    },
+    pm: function(v) {
+      self.from_greenwich = (PrimeMeridian[v] ? PrimeMeridian[v] : parseFloat(v, 10)) * D2R;
+    },
+    nadgrids: function(v) {
+      if (v === '@null') {
+        self.datumCode = 'none';
+      }
+      else {
+        self.nadgrids = v;
+      }
+    },
+    axis: function(v) {
+      var legalAxis = "ewnsud";
+      if (v.length === 3 && legalAxis.indexOf(v.substr(0, 1)) !== -1 && legalAxis.indexOf(v.substr(1, 1)) !== -1 && legalAxis.indexOf(v.substr(2, 1)) !== -1) {
+        self.axis = v;
+      }
+    }
+  };
+  for (paramName in paramObj) {
+    paramVal = paramObj[paramName];
+    if (paramName in params) {
+      paramOutname = params[paramName];
+      if (typeof paramOutname === 'function') {
+        paramOutname(paramVal);
+      }
+      else {
+        self[paramOutname] = paramVal;
+      }
+    }
+    else {
+      self[paramName] = paramVal;
+    }
+  }
+  if(typeof self.datumCode === 'string' && self.datumCode !== "WGS84"){
+    self.datumCode = self.datumCode.toLowerCase();
+  }
+  return self;
+};
+
+},{"./constants/PrimeMeridian":70}],82:[function(require,module,exports){
+var projs = [
+  require('./projections/merc'),
+  require('./projections/longlat')
+];
+var names = {};
+var projStore = [];
+
+function add(proj, i) {
+  var len = projStore.length;
+  if (!proj.names) {
+    console.log(i);
+    return true;
+  }
+  projStore[len] = proj;
+  proj.names.forEach(function(n) {
+    names[n.toLowerCase()] = len;
+  });
+  return this;
+}
+
+exports.add = add;
+
+exports.get = function(name) {
+  if (!name) {
+    return false;
+  }
+  var n = name.toLowerCase();
+  if (typeof names[n] !== 'undefined' && projStore[names[n]]) {
+    return projStore[names[n]];
+  }
+};
+exports.start = function() {
+  projs.forEach(add);
+};
+
+},{"./projections/longlat":94,"./projections/merc":95}],83:[function(require,module,exports){
+var EPSLN = 1.0e-10;
+var msfnz = require('../common/msfnz');
+var qsfnz = require('../common/qsfnz');
+var adjust_lon = require('../common/adjust_lon');
+var asinz = require('../common/asinz');
+exports.init = function() {
+
+  if (Math.abs(this.lat1 + this.lat2) < EPSLN) {
+    return;
+  }
+  this.temp = this.b / this.a;
+  this.es = 1 - Math.pow(this.temp, 2);
+  this.e3 = Math.sqrt(this.es);
+
+  this.sin_po = Math.sin(this.lat1);
+  this.cos_po = Math.cos(this.lat1);
+  this.t1 = this.sin_po;
+  this.con = this.sin_po;
+  this.ms1 = msfnz(this.e3, this.sin_po, this.cos_po);
+  this.qs1 = qsfnz(this.e3, this.sin_po, this.cos_po);
+
+  this.sin_po = Math.sin(this.lat2);
+  this.cos_po = Math.cos(this.lat2);
+  this.t2 = this.sin_po;
+  this.ms2 = msfnz(this.e3, this.sin_po, this.cos_po);
+  this.qs2 = qsfnz(this.e3, this.sin_po, this.cos_po);
+
+  this.sin_po = Math.sin(this.lat0);
+  this.cos_po = Math.cos(this.lat0);
+  this.t3 = this.sin_po;
+  this.qs0 = qsfnz(this.e3, this.sin_po, this.cos_po);
+
+  if (Math.abs(this.lat1 - this.lat2) > EPSLN) {
+    this.ns0 = (this.ms1 * this.ms1 - this.ms2 * this.ms2) / (this.qs2 - this.qs1);
+  }
+  else {
+    this.ns0 = this.con;
+  }
+  this.c = this.ms1 * this.ms1 + this.ns0 * this.qs1;
+  this.rh = this.a * Math.sqrt(this.c - this.ns0 * this.qs0) / this.ns0;
+};
+
+/* Albers Conical Equal Area forward equations--mapping lat,long to x,y
+  -------------------------------------------------------------------*/
+exports.forward = function(p) {
+
+  var lon = p.x;
+  var lat = p.y;
+
+  this.sin_phi = Math.sin(lat);
+  this.cos_phi = Math.cos(lat);
+
+  var qs = qsfnz(this.e3, this.sin_phi, this.cos_phi);
+  var rh1 = this.a * Math.sqrt(this.c - this.ns0 * qs) / this.ns0;
+  var theta = this.ns0 * adjust_lon(lon - this.long0);
+  var x = rh1 * Math.sin(theta) + this.x0;
+  var y = this.rh - rh1 * Math.cos(theta) + this.y0;
+
+  p.x = x;
+  p.y = y;
+  return p;
+};
+
+
+exports.inverse = function(p) {
+  var rh1, qs, con, theta, lon, lat;
+
+  p.x -= this.x0;
+  p.y = this.rh - p.y + this.y0;
+  if (this.ns0 >= 0) {
+    rh1 = Math.sqrt(p.x * p.x + p.y * p.y);
+    con = 1;
+  }
+  else {
+    rh1 = -Math.sqrt(p.x * p.x + p.y * p.y);
+    con = -1;
+  }
+  theta = 0;
+  if (rh1 !== 0) {
+    theta = Math.atan2(con * p.x, con * p.y);
+  }
+  con = rh1 * this.ns0 / this.a;
+  if (this.sphere) {
+    lat = Math.asin((this.c - con * con) / (2 * this.ns0));
+  }
+  else {
+    qs = (this.c - con * con) / this.ns0;
+    lat = this.phi1z(this.e3, qs);
+  }
+
+  lon = adjust_lon(theta / this.ns0 + this.long0);
+  p.x = lon;
+  p.y = lat;
+  return p;
+};
+
+/* Function to compute phi1, the latitude for the inverse of the
+   Albers Conical Equal-Area projection.
+-------------------------------------------*/
+exports.phi1z = function(eccent, qs) {
+  var sinphi, cosphi, con, com, dphi;
+  var phi = asinz(0.5 * qs);
+  if (eccent < EPSLN) {
+    return phi;
+  }
+
+  var eccnts = eccent * eccent;
+  for (var i = 1; i <= 25; i++) {
+    sinphi = Math.sin(phi);
+    cosphi = Math.cos(phi);
+    con = eccent * sinphi;
+    com = 1 - con * con;
+    dphi = 0.5 * com * com / cosphi * (qs / (1 - eccnts) - sinphi / com + 0.5 / eccent * Math.log((1 - con) / (1 + con)));
+    phi = phi + dphi;
+    if (Math.abs(dphi) <= 1e-7) {
+      return phi;
+    }
+  }
+  return null;
+};
+exports.names = ["Albers_Conic_Equal_Area", "Albers", "aea"];
+
+},{"../common/adjust_lon":48,"../common/asinz":49,"../common/msfnz":58,"../common/qsfnz":63}],84:[function(require,module,exports){
+var adjust_lon = require('../common/adjust_lon');
+var HALF_PI = Math.PI/2;
+var EPSLN = 1.0e-10;
+var mlfn = require('../common/mlfn');
+var e0fn = require('../common/e0fn');
+var e1fn = require('../common/e1fn');
+var e2fn = require('../common/e2fn');
+var e3fn = require('../common/e3fn');
+var gN = require('../common/gN');
+var asinz = require('../common/asinz');
+var imlfn = require('../common/imlfn');
+exports.init = function() {
+  this.sin_p12 = Math.sin(this.lat0);
+  this.cos_p12 = Math.cos(this.lat0);
+};
+
+exports.forward = function(p) {
+  var lon = p.x;
+  var lat = p.y;
+  var sinphi = Math.sin(p.y);
+  var cosphi = Math.cos(p.y);
+  var dlon = adjust_lon(lon - this.long0);
+  var e0, e1, e2, e3, Mlp, Ml, tanphi, Nl1, Nl, psi, Az, G, H, GH, Hs, c, kp, cos_c, s, s2, s3, s4, s5;
+  if (this.sphere) {
+    if (Math.abs(this.sin_p12 - 1) <= EPSLN) {
+      //North Pole case
+      p.x = this.x0 + this.a * (HALF_PI - lat) * Math.sin(dlon);
+      p.y = this.y0 - this.a * (HALF_PI - lat) * Math.cos(dlon);
+      return p;
+    }
+    else if (Math.abs(this.sin_p12 + 1) <= EPSLN) {
+      //South Pole case
+      p.x = this.x0 + this.a * (HALF_PI + lat) * Math.sin(dlon);
+      p.y = this.y0 + this.a * (HALF_PI + lat) * Math.cos(dlon);
+      return p;
+    }
+    else {
+      //default case
+      cos_c = this.sin_p12 * sinphi + this.cos_p12 * cosphi * Math.cos(dlon);
+      c = Math.acos(cos_c);
+      kp = c / Math.sin(c);
+      p.x = this.x0 + this.a * kp * cosphi * Math.sin(dlon);
+      p.y = this.y0 + this.a * kp * (this.cos_p12 * sinphi - this.sin_p12 * cosphi * Math.cos(dlon));
+      return p;
+    }
+  }
+  else {
+    e0 = e0fn(this.es);
+    e1 = e1fn(this.es);
+    e2 = e2fn(this.es);
+    e3 = e3fn(this.es);
+    if (Math.abs(this.sin_p12 - 1) <= EPSLN) {
+      //North Pole case
+      Mlp = this.a * mlfn(e0, e1, e2, e3, HALF_PI);
+      Ml = this.a * mlfn(e0, e1, e2, e3, lat);
+      p.x = this.x0 + (Mlp - Ml) * Math.sin(dlon);
+      p.y = this.y0 - (Mlp - Ml) * Math.cos(dlon);
+      return p;
+    }
+    else if (Math.abs(this.sin_p12 + 1) <= EPSLN) {
+      //South Pole case
+      Mlp = this.a * mlfn(e0, e1, e2, e3, HALF_PI);
+      Ml = this.a * mlfn(e0, e1, e2, e3, lat);
+      p.x = this.x0 + (Mlp + Ml) * Math.sin(dlon);
+      p.y = this.y0 + (Mlp + Ml) * Math.cos(dlon);
+      return p;
+    }
+    else {
+      //Default case
+      tanphi = sinphi / cosphi;
+      Nl1 = gN(this.a, this.e, this.sin_p12);
+      Nl = gN(this.a, this.e, sinphi);
+      psi = Math.atan((1 - this.es) * tanphi + this.es * Nl1 * this.sin_p12 / (Nl * cosphi));
+      Az = Math.atan2(Math.sin(dlon), this.cos_p12 * Math.tan(psi) - this.sin_p12 * Math.cos(dlon));
+      if (Az === 0) {
+        s = Math.asin(this.cos_p12 * Math.sin(psi) - this.sin_p12 * Math.cos(psi));
+      }
+      else if (Math.abs(Math.abs(Az) - Math.PI) <= EPSLN) {
+        s = -Math.asin(this.cos_p12 * Math.sin(psi) - this.sin_p12 * Math.cos(psi));
+      }
+      else {
+        s = Math.asin(Math.sin(dlon) * Math.cos(psi) / Math.sin(Az));
+      }
+      G = this.e * this.sin_p12 / Math.sqrt(1 - this.es);
+      H = this.e * this.cos_p12 * Math.cos(Az) / Math.sqrt(1 - this.es);
+      GH = G * H;
+      Hs = H * H;
+      s2 = s * s;
+      s3 = s2 * s;
+      s4 = s3 * s;
+      s5 = s4 * s;
+      c = Nl1 * s * (1 - s2 * Hs * (1 - Hs) / 6 + s3 / 8 * GH * (1 - 2 * Hs) + s4 / 120 * (Hs * (4 - 7 * Hs) - 3 * G * G * (1 - 7 * Hs)) - s5 / 48 * GH);
+      p.x = this.x0 + c * Math.sin(Az);
+      p.y = this.y0 + c * Math.cos(Az);
+      return p;
+    }
+  }
+
+
+};
+
+exports.inverse = function(p) {
+  p.x -= this.x0;
+  p.y -= this.y0;
+  var rh, z, sinz, cosz, lon, lat, con, e0, e1, e2, e3, Mlp, M, N1, psi, Az, cosAz, tmp, A, B, D, Ee, F;
+  if (this.sphere) {
+    rh = Math.sqrt(p.x * p.x + p.y * p.y);
+    if (rh > (2 * HALF_PI * this.a)) {
+      return;
+    }
+    z = rh / this.a;
+
+    sinz = Math.sin(z);
+    cosz = Math.cos(z);
+
+    lon = this.long0;
+    if (Math.abs(rh) <= EPSLN) {
+      lat = this.lat0;
+    }
+    else {
+      lat = asinz(cosz * this.sin_p12 + (p.y * sinz * this.cos_p12) / rh);
+      con = Math.abs(this.lat0) - HALF_PI;
+      if (Math.abs(con) <= EPSLN) {
+        if (this.lat0 >= 0) {
+          lon = adjust_lon(this.long0 + Math.atan2(p.x, - p.y));
+        }
+        else {
+          lon = adjust_lon(this.long0 - Math.atan2(-p.x, p.y));
+        }
+      }
+      else {
+        /*con = cosz - this.sin_p12 * Math.sin(lat);
+        if ((Math.abs(con) < EPSLN) && (Math.abs(p.x) < EPSLN)) {
+          //no-op, just keep the lon value as is
+        } else {
+          var temp = Math.atan2((p.x * sinz * this.cos_p12), (con * rh));
+          lon = adjust_lon(this.long0 + Math.atan2((p.x * sinz * this.cos_p12), (con * rh)));
+        }*/
+        lon = adjust_lon(this.long0 + Math.atan2(p.x * sinz, rh * this.cos_p12 * cosz - p.y * this.sin_p12 * sinz));
+      }
+    }
+
+    p.x = lon;
+    p.y = lat;
+    return p;
+  }
+  else {
+    e0 = e0fn(this.es);
+    e1 = e1fn(this.es);
+    e2 = e2fn(this.es);
+    e3 = e3fn(this.es);
+    if (Math.abs(this.sin_p12 - 1) <= EPSLN) {
+      //North pole case
+      Mlp = this.a * mlfn(e0, e1, e2, e3, HALF_PI);
+      rh = Math.sqrt(p.x * p.x + p.y * p.y);
+      M = Mlp - rh;
+      lat = imlfn(M / this.a, e0, e1, e2, e3);
+      lon = adjust_lon(this.long0 + Math.atan2(p.x, - 1 * p.y));
+      p.x = lon;
+      p.y = lat;
+      return p;
+    }
+    else if (Math.abs(this.sin_p12 + 1) <= EPSLN) {
+      //South pole case
+      Mlp = this.a * mlfn(e0, e1, e2, e3, HALF_PI);
+      rh = Math.sqrt(p.x * p.x + p.y * p.y);
+      M = rh - Mlp;
+
+      lat = imlfn(M / this.a, e0, e1, e2, e3);
+      lon = adjust_lon(this.long0 + Math.atan2(p.x, p.y));
+      p.x = lon;
+      p.y = lat;
+      return p;
+    }
+    else {
+      //default case
+      rh = Math.sqrt(p.x * p.x + p.y * p.y);
+      Az = Math.atan2(p.x, p.y);
+      N1 = gN(this.a, this.e, this.sin_p12);
+      cosAz = Math.cos(Az);
+      tmp = this.e * this.cos_p12 * cosAz;
+      A = -tmp * tmp / (1 - this.es);
+      B = 3 * this.es * (1 - A) * this.sin_p12 * this.cos_p12 * cosAz / (1 - this.es);
+      D = rh / N1;
+      Ee = D - A * (1 + A) * Math.pow(D, 3) / 6 - B * (1 + 3 * A) * Math.pow(D, 4) / 24;
+      F = 1 - A * Ee * Ee / 2 - D * Ee * Ee * Ee / 6;
+      psi = Math.asin(this.sin_p12 * Math.cos(Ee) + this.cos_p12 * Math.sin(Ee) * cosAz);
+      lon = adjust_lon(this.long0 + Math.asin(Math.sin(Az) * Math.sin(Ee) / Math.cos(psi)));
+      lat = Math.atan((1 - this.es * F * this.sin_p12 / Math.sin(psi)) * Math.tan(psi) / (1 - this.es));
+      p.x = lon;
+      p.y = lat;
+      return p;
+    }
+  }
+
+};
+exports.names = ["Azimuthal_Equidistant", "aeqd"];
+
+},{"../common/adjust_lon":48,"../common/asinz":49,"../common/e0fn":50,"../common/e1fn":51,"../common/e2fn":52,"../common/e3fn":53,"../common/gN":54,"../common/imlfn":55,"../common/mlfn":57}],85:[function(require,module,exports){
+var mlfn = require('../common/mlfn');
+var e0fn = require('../common/e0fn');
+var e1fn = require('../common/e1fn');
+var e2fn = require('../common/e2fn');
+var e3fn = require('../common/e3fn');
+var gN = require('../common/gN');
+var adjust_lon = require('../common/adjust_lon');
+var adjust_lat = require('../common/adjust_lat');
+var imlfn = require('../common/imlfn');
+var HALF_PI = Math.PI/2;
+var EPSLN = 1.0e-10;
+exports.init = function() {
+  if (!this.sphere) {
+    this.e0 = e0fn(this.es);
+    this.e1 = e1fn(this.es);
+    this.e2 = e2fn(this.es);
+    this.e3 = e3fn(this.es);
+    this.ml0 = this.a * mlfn(this.e0, this.e1, this.e2, this.e3, this.lat0);
+  }
+};
+
+
+
+/* Cassini forward equations--mapping lat,long to x,y
+  -----------------------------------------------------------------------*/
+exports.forward = function(p) {
+
+  /* Forward equations
+      -----------------*/
+  var x, y;
+  var lam = p.x;
+  var phi = p.y;
+  lam = adjust_lon(lam - this.long0);
+
+  if (this.sphere) {
+    x = this.a * Math.asin(Math.cos(phi) * Math.sin(lam));
+    y = this.a * (Math.atan2(Math.tan(phi), Math.cos(lam)) - this.lat0);
+  }
+  else {
+    //ellipsoid
+    var sinphi = Math.sin(phi);
+    var cosphi = Math.cos(phi);
+    var nl = gN(this.a, this.e, sinphi);
+    var tl = Math.tan(phi) * Math.tan(phi);
+    var al = lam * Math.cos(phi);
+    var asq = al * al;
+    var cl = this.es * cosphi * cosphi / (1 - this.es);
+    var ml = this.a * mlfn(this.e0, this.e1, this.e2, this.e3, phi);
+
+    x = nl * al * (1 - asq * tl * (1 / 6 - (8 - tl + 8 * cl) * asq / 120));
+    y = ml - this.ml0 + nl * sinphi / cosphi * asq * (0.5 + (5 - tl + 6 * cl) * asq / 24);
+
+
+  }
+
+  p.x = x + this.x0;
+  p.y = y + this.y0;
+  return p;
+};
+
+/* Inverse equations
+  -----------------*/
+exports.inverse = function(p) {
+  p.x -= this.x0;
+  p.y -= this.y0;
+  var x = p.x / this.a;
+  var y = p.y / this.a;
+  var phi, lam;
+
+  if (this.sphere) {
+    var dd = y + this.lat0;
+    phi = Math.asin(Math.sin(dd) * Math.cos(x));
+    lam = Math.atan2(Math.tan(x), Math.cos(dd));
+  }
+  else {
+    /* ellipsoid */
+    var ml1 = this.ml0 / this.a + y;
+    var phi1 = imlfn(ml1, this.e0, this.e1, this.e2, this.e3);
+    if (Math.abs(Math.abs(phi1) - HALF_PI) <= EPSLN) {
+      p.x = this.long0;
+      p.y = HALF_PI;
+      if (y < 0) {
+        p.y *= -1;
+      }
+      return p;
+    }
+    var nl1 = gN(this.a, this.e, Math.sin(phi1));
+
+    var rl1 = nl1 * nl1 * nl1 / this.a / this.a * (1 - this.es);
+    var tl1 = Math.pow(Math.tan(phi1), 2);
+    var dl = x * this.a / nl1;
+    var dsq = dl * dl;
+    phi = phi1 - nl1 * Math.tan(phi1) / rl1 * dl * dl * (0.5 - (1 + 3 * tl1) * dl * dl / 24);
+    lam = dl * (1 - dsq * (tl1 / 3 + (1 + 3 * tl1) * tl1 * dsq / 15)) / Math.cos(phi1);
+
+  }
+
+  p.x = adjust_lon(lam + this.long0);
+  p.y = adjust_lat(phi);
+  return p;
+
+};
+exports.names = ["Cassini", "Cassini_Soldner", "cass"];
+},{"../common/adjust_lat":47,"../common/adjust_lon":48,"../common/e0fn":50,"../common/e1fn":51,"../common/e2fn":52,"../common/e3fn":53,"../common/gN":54,"../common/imlfn":55,"../common/mlfn":57}],86:[function(require,module,exports){
+var adjust_lon = require('../common/adjust_lon');
+var qsfnz = require('../common/qsfnz');
+var msfnz = require('../common/msfnz');
+var iqsfnz = require('../common/iqsfnz');
 /*
-Portions of this software are based on a port of components from the OpenMap
-com.bbn.openmap.proj.coords Java package. An initial port was initially created
-by Patrice G. Cappelaere and included in Community Mapbuilder
-(http://svn.codehaus.org/mapbuilder/), which is licensed under the LGPL license
-as per http://www.gnu.org/copyleft/lesser.html. OpenMap is licensed under the
-following license agreement:
-
-
-               OpenMap Software License Agreement
-               ----------------------------------
-
-This Agreement sets forth the terms and conditions under which
-the software known as OpenMap(tm) will be licensed by BBN
-Technologies ("BBN") to you ("Licensee"), and by which Derivative 
-Works (as hereafter defined) of OpenMap will be licensed by you to BBN.
-
-Definitions:
-
- "Derivative Work(s)" shall mean any revision, enhancement,
- modification, translation, abridgement, condensation or
- expansion created by Licensee or BBN that is based upon the
- Software or a portion thereof that would be a copyright
- infringement if prepared without the authorization of the
- copyright owners of the Software or portion thereof.
-
- "OpenMap" shall mean a programmer's toolkit for building map
- based applications as originally created by BBN, and any
- Derivative Works thereof as created by either BBN or Licensee,
- but shall include only those Derivative Works BBN has approved
- for inclusion into, and BBN has integrated into OpenMap.
-
- "Standard Version" shall mean OpenMap, as originally created by
- BBN.
-
- "Software" shall mean OpenMap and the Derivative Works created
- by Licensee and the collection of files distributed by the
- Licensee with OpenMap, and the collection of files created
- through textual modifications.
-
- "Copyright Holder" is whoever is named in the copyright or
- copyrights for the Derivative Works.
-
- "Licensee" is you, only if you agree to be bound by the terms
- and conditions set forth in this Agreement.
-
- "Reasonable copying fee" is whatever you can justify on the
- basis of media cost, duplication charges, time of people
- involved.
-
- "Freely Available" means that no fee is charged for the item
- itself, though there may be fees involved in handling the item.
- It also means that recipients of the item may redistribute it
- under the same conditions that they received it.
-
-1. BBN maintains all rights, title and interest in and to
-OpenMap, including all applicable copyrights, trade secrets,
-patents and other intellectual rights therein.  Licensee hereby
-grants to BBN all right, title and interest into the compilation
-of OpenMap.  Licensee shall own all rights, title and interest
-into the Derivative Works created by Licensee (subject to the
-compilation ownership by BBN).
-
-2. BBN hereby grants to Licensee a royalty free, worldwide right
-and license to use, copy, distribute and make Derivative Works of
-OpenMap, and sublicensing rights of any of the foregoing in
-accordance with the terms and conditions of this Agreement,
-provided that you duplicate all of the original copyright notices
-and associated disclaimers.
-
-3. Licensee hereby grants to BBN a royalty free, worldwide right
-and license to use, copy, distribute and make Derivative Works of
-Derivative Works created by Licensee and sublicensing rights of
-any of the foregoing.
-
-4. Licensee's right to create Derivative Works in the Software is
-subject to Licensee agreement to insert a prominent notice in
-each changed file stating how and when you changed that file, and
-provided that you do at least ONE of the following:
-
-    a) place your modifications in the Public Domain or otherwise
-       make them Freely Available, such as by posting said
-       modifications to Usenet or an equivalent medium, or
-       placing the modifications on a major archive site and by
-       providing your modifications to the Copyright Holder.
-
-    b) use the modified Package only within your corporation or
-       organization.
-
-    c) rename any non-standard executables so the names do not
-       conflict with standard executables, which must also be
-       provided, and provide a separate manual page for each
-       non-standard executable that clearly documents how it
-       differs from OpenMap.
-
-    d) make other distribution arrangements with the Copyright
-       Holder.
-
-5. Licensee may distribute the programs of this Software in
-object code or executable form, provided that you do at least ONE
-of the following:
-
-    a) distribute an OpenMap version of the executables and
-       library files, together with instructions (in the manual
-       page or equivalent) on where to get OpenMap.
-
-    b) accompany the distribution with the machine-readable
-       source code with your modifications.
-
-    c) accompany any non-standard executables with their
-       corresponding OpenMap executables, giving the non-standard
-       executables non-standard names, and clearly documenting
-       the differences in manual pages (or equivalent), together
-       with instructions on where to get OpenMap.
-
-    d) make other distribution arrangements with the Copyright
-       Holder.
-
-6. You may charge a reasonable copying fee for any distribution
-of this Software.  You may charge any fee you choose for support
-of this Software.  You may not charge a fee for this Software
-itself.  However, you may distribute this Software in aggregate
-with other (possibly commercial) programs as part of a larger
-(possibly commercial) software distribution provided that you do
-not advertise this Software as a product of your own.
-
-7. The data and images supplied as input to or produced as output
-from the Software do not automatically fall under the copyright
-of this Software, but belong to whomever generated them, and may
-be sold commercially, and may be aggregated with this Software.
-
-8. BBN makes no representation about the suitability of OpenMap
-for any purposes.  BBN shall have no duty or requirement to
-include any Derivative Works into OpenMap.
-
-9. Each party hereto represents and warrants that they have the
-full unrestricted right to grant all rights and licenses granted
-to the other party herein.
-
-10. THIS PACKAGE IS PROVIDED "AS IS" WITHOUT WARRANTIES OF ANY
-KIND, WHETHER EXPRESS OR IMPLIED, INCLUDING (BUT NOT LIMITED TO)
-ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, AND
-WITHOUT ANY WARRANTIES AS TO NONINFRINGEMENT.
-
-11. IN NO EVENT SHALL COPYRIGHT HOLDER BE LIABLE FOR ANY DIRECT,
-SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES WHATSOEVER RESULTING
-FROM LOSS OF USE OF DATA OR PROFITS, WHETHER IN AN ACTION OF
-CONTRACT, NEGLIGENCE OR OTHER TORTIOUS CONDUCT, ARISING OUT OF OR
-IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS PACKAGE.
-
-12. Without limitation of the foregoing, You agree to commit no
-act which, directly or indirectly, would violate any U.S. law,
-regulation, or treaty, or any other international treaty or
-agreement to which the United States adheres or with which the
-United States complies, relating to the export or re-export of
-any commodities, software, or technical data.
+  reference:  
+    "Cartographic Projection Procedures for the UNIX Environment-
+    A User's Manual" by Gerald I. Evenden,
+    USGS Open File Report 90-284and Release 4 Interim Reports (2003)
 */
+exports.init = function() {
+  //no-op
+  if (!this.sphere) {
+    this.k0 = msfnz(this.e, Math.sin(this.lat_ts), Math.cos(this.lat_ts));
+  }
+};
 
+
+/* Cylindrical Equal Area forward equations--mapping lat,long to x,y
+    ------------------------------------------------------------*/
+exports.forward = function(p) {
+  var lon = p.x;
+  var lat = p.y;
+  var x, y;
+  /* Forward equations
+      -----------------*/
+  var dlon = adjust_lon(lon - this.long0);
+  if (this.sphere) {
+    x = this.x0 + this.a * dlon * Math.cos(this.lat_ts);
+    y = this.y0 + this.a * Math.sin(lat) / Math.cos(this.lat_ts);
+  }
+  else {
+    var qs = qsfnz(this.e, Math.sin(lat));
+    x = this.x0 + this.a * this.k0 * dlon;
+    y = this.y0 + this.a * qs * 0.5 / this.k0;
+  }
+
+  p.x = x;
+  p.y = y;
+  return p;
+};
+
+/* Cylindrical Equal Area inverse equations--mapping x,y to lat/long
+    ------------------------------------------------------------*/
+exports.inverse = function(p) {
+  p.x -= this.x0;
+  p.y -= this.y0;
+  var lon, lat;
+
+  if (this.sphere) {
+    lon = adjust_lon(this.long0 + (p.x / this.a) / Math.cos(this.lat_ts));
+    lat = Math.asin((p.y / this.a) * Math.cos(this.lat_ts));
+  }
+  else {
+    lat = iqsfnz(this.e, 2 * p.y * this.k0 / this.a);
+    lon = adjust_lon(this.long0 + p.x / (this.a * this.k0));
+  }
+
+  p.x = lon;
+  p.y = lat;
+  return p;
+};
+exports.names = ["cea"];
+
+},{"../common/adjust_lon":48,"../common/iqsfnz":56,"../common/msfnz":58,"../common/qsfnz":63}],87:[function(require,module,exports){
+var adjust_lon = require('../common/adjust_lon');
+var adjust_lat = require('../common/adjust_lat');
+exports.init = function() {
+
+  this.x0 = this.x0 || 0;
+  this.y0 = this.y0 || 0;
+  this.lat0 = this.lat0 || 0;
+  this.long0 = this.long0 || 0;
+  this.lat_ts = this.lat_ts || 0;
+  this.title = this.title || "Equidistant Cylindrical (Plate Carre)";
+
+  this.rc = Math.cos(this.lat_ts);
+};
+
+
+// forward equations--mapping lat,long to x,y
+// -----------------------------------------------------------------
+exports.forward = function(p) {
+
+  var lon = p.x;
+  var lat = p.y;
+
+  var dlon = adjust_lon(lon - this.long0);
+  var dlat = adjust_lat(lat - this.lat0);
+  p.x = this.x0 + (this.a * dlon * this.rc);
+  p.y = this.y0 + (this.a * dlat);
+  return p;
+};
+
+// inverse equations--mapping x,y to lat/long
+// -----------------------------------------------------------------
+exports.inverse = function(p) {
+
+  var x = p.x;
+  var y = p.y;
+
+  p.x = adjust_lon(this.long0 + ((x - this.x0) / (this.a * this.rc)));
+  p.y = adjust_lat(this.lat0 + ((y - this.y0) / (this.a)));
+  return p;
+};
+exports.names = ["Equirectangular", "Equidistant_Cylindrical", "eqc"];
+
+},{"../common/adjust_lat":47,"../common/adjust_lon":48}],88:[function(require,module,exports){
+var e0fn = require('../common/e0fn');
+var e1fn = require('../common/e1fn');
+var e2fn = require('../common/e2fn');
+var e3fn = require('../common/e3fn');
+var msfnz = require('../common/msfnz');
+var mlfn = require('../common/mlfn');
+var adjust_lon = require('../common/adjust_lon');
+var adjust_lat = require('../common/adjust_lat');
+var imlfn = require('../common/imlfn');
+var EPSLN = 1.0e-10;
+exports.init = function() {
+
+  /* Place parameters in static storage for common use
+      -------------------------------------------------*/
+  // Standard Parallels cannot be equal and on opposite sides of the equator
+  if (Math.abs(this.lat1 + this.lat2) < EPSLN) {
+    return;
+  }
+  this.lat2 = this.lat2 || this.lat1;
+  this.temp = this.b / this.a;
+  this.es = 1 - Math.pow(this.temp, 2);
+  this.e = Math.sqrt(this.es);
+  this.e0 = e0fn(this.es);
+  this.e1 = e1fn(this.es);
+  this.e2 = e2fn(this.es);
+  this.e3 = e3fn(this.es);
+
+  this.sinphi = Math.sin(this.lat1);
+  this.cosphi = Math.cos(this.lat1);
+
+  this.ms1 = msfnz(this.e, this.sinphi, this.cosphi);
+  this.ml1 = mlfn(this.e0, this.e1, this.e2, this.e3, this.lat1);
+
+  if (Math.abs(this.lat1 - this.lat2) < EPSLN) {
+    this.ns = this.sinphi;
+  }
+  else {
+    this.sinphi = Math.sin(this.lat2);
+    this.cosphi = Math.cos(this.lat2);
+    this.ms2 = msfnz(this.e, this.sinphi, this.cosphi);
+    this.ml2 = mlfn(this.e0, this.e1, this.e2, this.e3, this.lat2);
+    this.ns = (this.ms1 - this.ms2) / (this.ml2 - this.ml1);
+  }
+  this.g = this.ml1 + this.ms1 / this.ns;
+  this.ml0 = mlfn(this.e0, this.e1, this.e2, this.e3, this.lat0);
+  this.rh = this.a * (this.g - this.ml0);
+};
+
+
+/* Equidistant Conic forward equations--mapping lat,long to x,y
+  -----------------------------------------------------------*/
+exports.forward = function(p) {
+  var lon = p.x;
+  var lat = p.y;
+  var rh1;
+
+  /* Forward equations
+      -----------------*/
+  if (this.sphere) {
+    rh1 = this.a * (this.g - lat);
+  }
+  else {
+    var ml = mlfn(this.e0, this.e1, this.e2, this.e3, lat);
+    rh1 = this.a * (this.g - ml);
+  }
+  var theta = this.ns * adjust_lon(lon - this.long0);
+  var x = this.x0 + rh1 * Math.sin(theta);
+  var y = this.y0 + this.rh - rh1 * Math.cos(theta);
+  p.x = x;
+  p.y = y;
+  return p;
+};
+
+/* Inverse equations
+  -----------------*/
+exports.inverse = function(p) {
+  p.x -= this.x0;
+  p.y = this.rh - p.y + this.y0;
+  var con, rh1, lat, lon;
+  if (this.ns >= 0) {
+    rh1 = Math.sqrt(p.x * p.x + p.y * p.y);
+    con = 1;
+  }
+  else {
+    rh1 = -Math.sqrt(p.x * p.x + p.y * p.y);
+    con = -1;
+  }
+  var theta = 0;
+  if (rh1 !== 0) {
+    theta = Math.atan2(con * p.x, con * p.y);
+  }
+
+  if (this.sphere) {
+    lon = adjust_lon(this.long0 + theta / this.ns);
+    lat = adjust_lat(this.g - rh1 / this.a);
+    p.x = lon;
+    p.y = lat;
+    return p;
+  }
+  else {
+    var ml = this.g - rh1 / this.a;
+    lat = imlfn(ml, this.e0, this.e1, this.e2, this.e3);
+    lon = adjust_lon(this.long0 + theta / this.ns);
+    p.x = lon;
+    p.y = lat;
+    return p;
+  }
+
+};
+exports.names = ["Equidistant_Conic", "eqdc"];
+
+},{"../common/adjust_lat":47,"../common/adjust_lon":48,"../common/e0fn":50,"../common/e1fn":51,"../common/e2fn":52,"../common/e3fn":53,"../common/imlfn":55,"../common/mlfn":57,"../common/msfnz":58}],89:[function(require,module,exports){
+var FORTPI = Math.PI/4;
+var srat = require('../common/srat');
+var HALF_PI = Math.PI/2;
+var MAX_ITER = 20;
+exports.init = function() {
+  var sphi = Math.sin(this.lat0);
+  var cphi = Math.cos(this.lat0);
+  cphi *= cphi;
+  this.rc = Math.sqrt(1 - this.es) / (1 - this.es * sphi * sphi);
+  this.C = Math.sqrt(1 + this.es * cphi * cphi / (1 - this.es));
+  this.phic0 = Math.asin(sphi / this.C);
+  this.ratexp = 0.5 * this.C * this.e;
+  this.K = Math.tan(0.5 * this.phic0 + FORTPI) / (Math.pow(Math.tan(0.5 * this.lat0 + FORTPI), this.C) * srat(this.e * sphi, this.ratexp));
+};
+
+exports.forward = function(p) {
+  var lon = p.x;
+  var lat = p.y;
+
+  p.y = 2 * Math.atan(this.K * Math.pow(Math.tan(0.5 * lat + FORTPI), this.C) * srat(this.e * Math.sin(lat), this.ratexp)) - HALF_PI;
+  p.x = this.C * lon;
+  return p;
+};
+
+exports.inverse = function(p) {
+  var DEL_TOL = 1e-14;
+  var lon = p.x / this.C;
+  var lat = p.y;
+  var num = Math.pow(Math.tan(0.5 * lat + FORTPI) / this.K, 1 / this.C);
+  for (var i = MAX_ITER; i > 0; --i) {
+    lat = 2 * Math.atan(num * srat(this.e * Math.sin(p.y), - 0.5 * this.e)) - HALF_PI;
+    if (Math.abs(lat - p.y) < DEL_TOL) {
+      break;
+    }
+    p.y = lat;
+  }
+  /* convergence failed */
+  if (!i) {
+    return null;
+  }
+  p.x = lon;
+  p.y = lat;
+  return p;
+};
+exports.names = ["gauss"];
+
+},{"../common/srat":65}],90:[function(require,module,exports){
+var adjust_lon = require('../common/adjust_lon');
+var EPSLN = 1.0e-10;
+var asinz = require('../common/asinz');
+
+/*
+  reference:
+    Wolfram Mathworld "Gnomonic Projection"
+    http://mathworld.wolfram.com/GnomonicProjection.html
+    Accessed: 12th November 2009
+  */
+exports.init = function() {
+
+  /* Place parameters in static storage for common use
+      -------------------------------------------------*/
+  this.sin_p14 = Math.sin(this.lat0);
+  this.cos_p14 = Math.cos(this.lat0);
+  // Approximation for projecting points to the horizon (infinity)
+  this.infinity_dist = 1000 * this.a;
+  this.rc = 1;
+};
+
+
+/* Gnomonic forward equations--mapping lat,long to x,y
+    ---------------------------------------------------*/
+exports.forward = function(p) {
+  var sinphi, cosphi; /* sin and cos value        */
+  var dlon; /* delta longitude value      */
+  var coslon; /* cos of longitude        */
+  var ksp; /* scale factor          */
+  var g;
+  var x, y;
+  var lon = p.x;
+  var lat = p.y;
+  /* Forward equations
+      -----------------*/
+  dlon = adjust_lon(lon - this.long0);
+
+  sinphi = Math.sin(lat);
+  cosphi = Math.cos(lat);
+
+  coslon = Math.cos(dlon);
+  g = this.sin_p14 * sinphi + this.cos_p14 * cosphi * coslon;
+  ksp = 1;
+  if ((g > 0) || (Math.abs(g) <= EPSLN)) {
+    x = this.x0 + this.a * ksp * cosphi * Math.sin(dlon) / g;
+    y = this.y0 + this.a * ksp * (this.cos_p14 * sinphi - this.sin_p14 * cosphi * coslon) / g;
+  }
+  else {
+
+    // Point is in the opposing hemisphere and is unprojectable
+    // We still need to return a reasonable point, so we project 
+    // to infinity, on a bearing 
+    // equivalent to the northern hemisphere equivalent
+    // This is a reasonable approximation for short shapes and lines that 
+    // straddle the horizon.
+
+    x = this.x0 + this.infinity_dist * cosphi * Math.sin(dlon);
+    y = this.y0 + this.infinity_dist * (this.cos_p14 * sinphi - this.sin_p14 * cosphi * coslon);
+
+  }
+  p.x = x;
+  p.y = y;
+  return p;
+};
+
+
+exports.inverse = function(p) {
+  var rh; /* Rho */
+  var sinc, cosc;
+  var c;
+  var lon, lat;
+
+  /* Inverse equations
+      -----------------*/
+  p.x = (p.x - this.x0) / this.a;
+  p.y = (p.y - this.y0) / this.a;
+
+  p.x /= this.k0;
+  p.y /= this.k0;
+
+  if ((rh = Math.sqrt(p.x * p.x + p.y * p.y))) {
+    c = Math.atan2(rh, this.rc);
+    sinc = Math.sin(c);
+    cosc = Math.cos(c);
+
+    lat = asinz(cosc * this.sin_p14 + (p.y * sinc * this.cos_p14) / rh);
+    lon = Math.atan2(p.x * sinc, rh * this.cos_p14 * cosc - p.y * this.sin_p14 * sinc);
+    lon = adjust_lon(this.long0 + lon);
+  }
+  else {
+    lat = this.phic0;
+    lon = 0;
+  }
+
+  p.x = lon;
+  p.y = lat;
+  return p;
+};
+exports.names = ["gnom"];
+
+},{"../common/adjust_lon":48,"../common/asinz":49}],91:[function(require,module,exports){
+var adjust_lon = require('../common/adjust_lon');
+exports.init = function() {
+  this.a = 6377397.155;
+  this.es = 0.006674372230614;
+  this.e = Math.sqrt(this.es);
+  if (!this.lat0) {
+    this.lat0 = 0.863937979737193;
+  }
+  if (!this.long0) {
+    this.long0 = 0.7417649320975901 - 0.308341501185665;
+  }
+  /* if scale not set default to 0.9999 */
+  if (!this.k0) {
+    this.k0 = 0.9999;
+  }
+  this.s45 = 0.785398163397448; /* 45 */
+  this.s90 = 2 * this.s45;
+  this.fi0 = this.lat0;
+  this.e2 = this.es;
+  this.e = Math.sqrt(this.e2);
+  this.alfa = Math.sqrt(1 + (this.e2 * Math.pow(Math.cos(this.fi0), 4)) / (1 - this.e2));
+  this.uq = 1.04216856380474;
+  this.u0 = Math.asin(Math.sin(this.fi0) / this.alfa);
+  this.g = Math.pow((1 + this.e * Math.sin(this.fi0)) / (1 - this.e * Math.sin(this.fi0)), this.alfa * this.e / 2);
+  this.k = Math.tan(this.u0 / 2 + this.s45) / Math.pow(Math.tan(this.fi0 / 2 + this.s45), this.alfa) * this.g;
+  this.k1 = this.k0;
+  this.n0 = this.a * Math.sqrt(1 - this.e2) / (1 - this.e2 * Math.pow(Math.sin(this.fi0), 2));
+  this.s0 = 1.37008346281555;
+  this.n = Math.sin(this.s0);
+  this.ro0 = this.k1 * this.n0 / Math.tan(this.s0);
+  this.ad = this.s90 - this.uq;
+};
+
+/* ellipsoid */
+/* calculate xy from lat/lon */
+/* Constants, identical to inverse transform function */
+exports.forward = function(p) {
+  var gfi, u, deltav, s, d, eps, ro;
+  var lon = p.x;
+  var lat = p.y;
+  var delta_lon = adjust_lon(lon - this.long0);
+  /* Transformation */
+  gfi = Math.pow(((1 + this.e * Math.sin(lat)) / (1 - this.e * Math.sin(lat))), (this.alfa * this.e / 2));
+  u = 2 * (Math.atan(this.k * Math.pow(Math.tan(lat / 2 + this.s45), this.alfa) / gfi) - this.s45);
+  deltav = -delta_lon * this.alfa;
+  s = Math.asin(Math.cos(this.ad) * Math.sin(u) + Math.sin(this.ad) * Math.cos(u) * Math.cos(deltav));
+  d = Math.asin(Math.cos(u) * Math.sin(deltav) / Math.cos(s));
+  eps = this.n * d;
+  ro = this.ro0 * Math.pow(Math.tan(this.s0 / 2 + this.s45), this.n) / Math.pow(Math.tan(s / 2 + this.s45), this.n);
+  p.y = ro * Math.cos(eps) / 1;
+  p.x = ro * Math.sin(eps) / 1;
+
+  if (!this.czech) {
+    p.y *= -1;
+    p.x *= -1;
+  }
+  return (p);
+};
+
+/* calculate lat/lon from xy */
+exports.inverse = function(p) {
+  var u, deltav, s, d, eps, ro, fi1;
+  var ok;
+
+  /* Transformation */
+  /* revert y, x*/
+  var tmp = p.x;
+  p.x = p.y;
+  p.y = tmp;
+  if (!this.czech) {
+    p.y *= -1;
+    p.x *= -1;
+  }
+  ro = Math.sqrt(p.x * p.x + p.y * p.y);
+  eps = Math.atan2(p.y, p.x);
+  d = eps / Math.sin(this.s0);
+  s = 2 * (Math.atan(Math.pow(this.ro0 / ro, 1 / this.n) * Math.tan(this.s0 / 2 + this.s45)) - this.s45);
+  u = Math.asin(Math.cos(this.ad) * Math.sin(s) - Math.sin(this.ad) * Math.cos(s) * Math.cos(d));
+  deltav = Math.asin(Math.cos(s) * Math.sin(d) / Math.cos(u));
+  p.x = this.long0 - deltav / this.alfa;
+  fi1 = u;
+  ok = 0;
+  var iter = 0;
+  do {
+    p.y = 2 * (Math.atan(Math.pow(this.k, - 1 / this.alfa) * Math.pow(Math.tan(u / 2 + this.s45), 1 / this.alfa) * Math.pow((1 + this.e * Math.sin(fi1)) / (1 - this.e * Math.sin(fi1)), this.e / 2)) - this.s45);
+    if (Math.abs(fi1 - p.y) < 0.0000000001) {
+      ok = 1;
+    }
+    fi1 = p.y;
+    iter += 1;
+  } while (ok === 0 && iter < 15);
+  if (iter >= 15) {
+    return null;
+  }
+
+  return (p);
+};
+exports.names = ["Krovak", "krovak"];
+
+},{"../common/adjust_lon":48}],92:[function(require,module,exports){
+var HALF_PI = Math.PI/2;
+var FORTPI = Math.PI/4;
+var EPSLN = 1.0e-10;
+var qsfnz = require('../common/qsfnz');
+var adjust_lon = require('../common/adjust_lon');
+/*
+  reference
+    "New Equal-Area Map Projections for Noncircular Regions", John P. Snyder,
+    The American Cartographer, Vol 15, No. 4, October 1988, pp. 341-355.
+  */
+
+exports.S_POLE = 1;
+exports.N_POLE = 2;
+exports.EQUIT = 3;
+exports.OBLIQ = 4;
+
+
+/* Initialize the Lambert Azimuthal Equal Area projection
+  ------------------------------------------------------*/
+exports.init = function() {
+  var t = Math.abs(this.lat0);
+  if (Math.abs(t - HALF_PI) < EPSLN) {
+    this.mode = this.lat0 < 0 ? this.S_POLE : this.N_POLE;
+  }
+  else if (Math.abs(t) < EPSLN) {
+    this.mode = this.EQUIT;
+  }
+  else {
+    this.mode = this.OBLIQ;
+  }
+  if (this.es > 0) {
+    var sinphi;
+
+    this.qp = qsfnz(this.e, 1);
+    this.mmf = 0.5 / (1 - this.es);
+    this.apa = this.authset(this.es);
+    switch (this.mode) {
+    case this.N_POLE:
+      this.dd = 1;
+      break;
+    case this.S_POLE:
+      this.dd = 1;
+      break;
+    case this.EQUIT:
+      this.rq = Math.sqrt(0.5 * this.qp);
+      this.dd = 1 / this.rq;
+      this.xmf = 1;
+      this.ymf = 0.5 * this.qp;
+      break;
+    case this.OBLIQ:
+      this.rq = Math.sqrt(0.5 * this.qp);
+      sinphi = Math.sin(this.lat0);
+      this.sinb1 = qsfnz(this.e, sinphi) / this.qp;
+      this.cosb1 = Math.sqrt(1 - this.sinb1 * this.sinb1);
+      this.dd = Math.cos(this.lat0) / (Math.sqrt(1 - this.es * sinphi * sinphi) * this.rq * this.cosb1);
+      this.ymf = (this.xmf = this.rq) / this.dd;
+      this.xmf *= this.dd;
+      break;
+    }
+  }
+  else {
+    if (this.mode === this.OBLIQ) {
+      this.sinph0 = Math.sin(this.lat0);
+      this.cosph0 = Math.cos(this.lat0);
+    }
+  }
+};
+
+/* Lambert Azimuthal Equal Area forward equations--mapping lat,long to x,y
+  -----------------------------------------------------------------------*/
+exports.forward = function(p) {
+
+  /* Forward equations
+      -----------------*/
+  var x, y, coslam, sinlam, sinphi, q, sinb, cosb, b, cosphi;
+  var lam = p.x;
+  var phi = p.y;
+
+  lam = adjust_lon(lam - this.long0);
+
+  if (this.sphere) {
+    sinphi = Math.sin(phi);
+    cosphi = Math.cos(phi);
+    coslam = Math.cos(lam);
+    if (this.mode === this.OBLIQ || this.mode === this.EQUIT) {
+      y = (this.mode === this.EQUIT) ? 1 + cosphi * coslam : 1 + this.sinph0 * sinphi + this.cosph0 * cosphi * coslam;
+      if (y <= EPSLN) {
+        return null;
+      }
+      y = Math.sqrt(2 / y);
+      x = y * cosphi * Math.sin(lam);
+      y *= (this.mode === this.EQUIT) ? sinphi : this.cosph0 * sinphi - this.sinph0 * cosphi * coslam;
+    }
+    else if (this.mode === this.N_POLE || this.mode === this.S_POLE) {
+      if (this.mode === this.N_POLE) {
+        coslam = -coslam;
+      }
+      if (Math.abs(phi + this.phi0) < EPSLN) {
+        return null;
+      }
+      y = FORTPI - phi * 0.5;
+      y = 2 * ((this.mode === this.S_POLE) ? Math.cos(y) : Math.sin(y));
+      x = y * Math.sin(lam);
+      y *= coslam;
+    }
+  }
+  else {
+    sinb = 0;
+    cosb = 0;
+    b = 0;
+    coslam = Math.cos(lam);
+    sinlam = Math.sin(lam);
+    sinphi = Math.sin(phi);
+    q = qsfnz(this.e, sinphi);
+    if (this.mode === this.OBLIQ || this.mode === this.EQUIT) {
+      sinb = q / this.qp;
+      cosb = Math.sqrt(1 - sinb * sinb);
+    }
+    switch (this.mode) {
+    case this.OBLIQ:
+      b = 1 + this.sinb1 * sinb + this.cosb1 * cosb * coslam;
+      break;
+    case this.EQUIT:
+      b = 1 + cosb * coslam;
+      break;
+    case this.N_POLE:
+      b = HALF_PI + phi;
+      q = this.qp - q;
+      break;
+    case this.S_POLE:
+      b = phi - HALF_PI;
+      q = this.qp + q;
+      break;
+    }
+    if (Math.abs(b) < EPSLN) {
+      return null;
+    }
+    switch (this.mode) {
+    case this.OBLIQ:
+    case this.EQUIT:
+      b = Math.sqrt(2 / b);
+      if (this.mode === this.OBLIQ) {
+        y = this.ymf * b * (this.cosb1 * sinb - this.sinb1 * cosb * coslam);
+      }
+      else {
+        y = (b = Math.sqrt(2 / (1 + cosb * coslam))) * sinb * this.ymf;
+      }
+      x = this.xmf * b * cosb * sinlam;
+      break;
+    case this.N_POLE:
+    case this.S_POLE:
+      if (q >= 0) {
+        x = (b = Math.sqrt(q)) * sinlam;
+        y = coslam * ((this.mode === this.S_POLE) ? b : -b);
+      }
+      else {
+        x = y = 0;
+      }
+      break;
+    }
+  }
+
+  p.x = this.a * x + this.x0;
+  p.y = this.a * y + this.y0;
+  return p;
+};
+
+/* Inverse equations
+  -----------------*/
+exports.inverse = function(p) {
+  p.x -= this.x0;
+  p.y -= this.y0;
+  var x = p.x / this.a;
+  var y = p.y / this.a;
+  var lam, phi, cCe, sCe, q, rho, ab;
+
+  if (this.sphere) {
+    var cosz = 0,
+      rh, sinz = 0;
+
+    rh = Math.sqrt(x * x + y * y);
+    phi = rh * 0.5;
+    if (phi > 1) {
+      return null;
+    }
+    phi = 2 * Math.asin(phi);
+    if (this.mode === this.OBLIQ || this.mode === this.EQUIT) {
+      sinz = Math.sin(phi);
+      cosz = Math.cos(phi);
+    }
+    switch (this.mode) {
+    case this.EQUIT:
+      phi = (Math.abs(rh) <= EPSLN) ? 0 : Math.asin(y * sinz / rh);
+      x *= sinz;
+      y = cosz * rh;
+      break;
+    case this.OBLIQ:
+      phi = (Math.abs(rh) <= EPSLN) ? this.phi0 : Math.asin(cosz * this.sinph0 + y * sinz * this.cosph0 / rh);
+      x *= sinz * this.cosph0;
+      y = (cosz - Math.sin(phi) * this.sinph0) * rh;
+      break;
+    case this.N_POLE:
+      y = -y;
+      phi = HALF_PI - phi;
+      break;
+    case this.S_POLE:
+      phi -= HALF_PI;
+      break;
+    }
+    lam = (y === 0 && (this.mode === this.EQUIT || this.mode === this.OBLIQ)) ? 0 : Math.atan2(x, y);
+  }
+  else {
+    ab = 0;
+    if (this.mode === this.OBLIQ || this.mode === this.EQUIT) {
+      x /= this.dd;
+      y *= this.dd;
+      rho = Math.sqrt(x * x + y * y);
+      if (rho < EPSLN) {
+        p.x = 0;
+        p.y = this.phi0;
+        return p;
+      }
+      sCe = 2 * Math.asin(0.5 * rho / this.rq);
+      cCe = Math.cos(sCe);
+      x *= (sCe = Math.sin(sCe));
+      if (this.mode === this.OBLIQ) {
+        ab = cCe * this.sinb1 + y * sCe * this.cosb1 / rho;
+        q = this.qp * ab;
+        y = rho * this.cosb1 * cCe - y * this.sinb1 * sCe;
+      }
+      else {
+        ab = y * sCe / rho;
+        q = this.qp * ab;
+        y = rho * cCe;
+      }
+    }
+    else if (this.mode === this.N_POLE || this.mode === this.S_POLE) {
+      if (this.mode === this.N_POLE) {
+        y = -y;
+      }
+      q = (x * x + y * y);
+      if (!q) {
+        p.x = 0;
+        p.y = this.phi0;
+        return p;
+      }
+      ab = 1 - q / this.qp;
+      if (this.mode === this.S_POLE) {
+        ab = -ab;
+      }
+    }
+    lam = Math.atan2(x, y);
+    phi = this.authlat(Math.asin(ab), this.apa);
+  }
+
+
+  p.x = adjust_lon(this.long0 + lam);
+  p.y = phi;
+  return p;
+};
+
+/* determine latitude from authalic latitude */
+exports.P00 = 0.33333333333333333333;
+exports.P01 = 0.17222222222222222222;
+exports.P02 = 0.10257936507936507936;
+exports.P10 = 0.06388888888888888888;
+exports.P11 = 0.06640211640211640211;
+exports.P20 = 0.01641501294219154443;
+
+exports.authset = function(es) {
+  var t;
+  var APA = [];
+  APA[0] = es * this.P00;
+  t = es * es;
+  APA[0] += t * this.P01;
+  APA[1] = t * this.P10;
+  t *= es;
+  APA[0] += t * this.P02;
+  APA[1] += t * this.P11;
+  APA[2] = t * this.P20;
+  return APA;
+};
+
+exports.authlat = function(beta, APA) {
+  var t = beta + beta;
+  return (beta + APA[0] * Math.sin(t) + APA[1] * Math.sin(t + t) + APA[2] * Math.sin(t + t + t));
+};
+exports.names = ["Lambert Azimuthal Equal Area", "Lambert_Azimuthal_Equal_Area", "laea"];
+
+},{"../common/adjust_lon":48,"../common/qsfnz":63}],93:[function(require,module,exports){
+var EPSLN = 1.0e-10;
+var msfnz = require('../common/msfnz');
+var tsfnz = require('../common/tsfnz');
+var HALF_PI = Math.PI/2;
+var sign = require('../common/sign');
+var adjust_lon = require('../common/adjust_lon');
+var phi2z = require('../common/phi2z');
+exports.init = function() {
+
+  // array of:  r_maj,r_min,lat1,lat2,c_lon,c_lat,false_east,false_north
+  //double c_lat;                   /* center latitude                      */
+  //double c_lon;                   /* center longitude                     */
+  //double lat1;                    /* first standard parallel              */
+  //double lat2;                    /* second standard parallel             */
+  //double r_maj;                   /* major axis                           */
+  //double r_min;                   /* minor axis                           */
+  //double false_east;              /* x offset in meters                   */
+  //double false_north;             /* y offset in meters                   */
+
+  if (!this.lat2) {
+    this.lat2 = this.lat1;
+  } //if lat2 is not defined
+  if (!this.k0) {
+    this.k0 = 1;
+  }
+  this.x0 = this.x0 || 0;
+  this.y0 = this.y0 || 0;
+  // Standard Parallels cannot be equal and on opposite sides of the equator
+  if (Math.abs(this.lat1 + this.lat2) < EPSLN) {
+    return;
+  }
+
+  var temp = this.b / this.a;
+  this.e = Math.sqrt(1 - temp * temp);
+
+  var sin1 = Math.sin(this.lat1);
+  var cos1 = Math.cos(this.lat1);
+  var ms1 = msfnz(this.e, sin1, cos1);
+  var ts1 = tsfnz(this.e, this.lat1, sin1);
+
+  var sin2 = Math.sin(this.lat2);
+  var cos2 = Math.cos(this.lat2);
+  var ms2 = msfnz(this.e, sin2, cos2);
+  var ts2 = tsfnz(this.e, this.lat2, sin2);
+
+  var ts0 = tsfnz(this.e, this.lat0, Math.sin(this.lat0));
+
+  if (Math.abs(this.lat1 - this.lat2) > EPSLN) {
+    this.ns = Math.log(ms1 / ms2) / Math.log(ts1 / ts2);
+  }
+  else {
+    this.ns = sin1;
+  }
+  if (isNaN(this.ns)) {
+    this.ns = sin1;
+  }
+  this.f0 = ms1 / (this.ns * Math.pow(ts1, this.ns));
+  this.rh = this.a * this.f0 * Math.pow(ts0, this.ns);
+  if (!this.title) {
+    this.title = "Lambert Conformal Conic";
+  }
+};
+
+
+// Lambert Conformal conic forward equations--mapping lat,long to x,y
+// -----------------------------------------------------------------
+exports.forward = function(p) {
+
+  var lon = p.x;
+  var lat = p.y;
+
+  // singular cases :
+  if (Math.abs(2 * Math.abs(lat) - Math.PI) <= EPSLN) {
+    lat = sign(lat) * (HALF_PI - 2 * EPSLN);
+  }
+
+  var con = Math.abs(Math.abs(lat) - HALF_PI);
+  var ts, rh1;
+  if (con > EPSLN) {
+    ts = tsfnz(this.e, lat, Math.sin(lat));
+    rh1 = this.a * this.f0 * Math.pow(ts, this.ns);
+  }
+  else {
+    con = lat * this.ns;
+    if (con <= 0) {
+      return null;
+    }
+    rh1 = 0;
+  }
+  var theta = this.ns * adjust_lon(lon - this.long0);
+  p.x = this.k0 * (rh1 * Math.sin(theta)) + this.x0;
+  p.y = this.k0 * (this.rh - rh1 * Math.cos(theta)) + this.y0;
+
+  return p;
+};
+
+// Lambert Conformal Conic inverse equations--mapping x,y to lat/long
+// -----------------------------------------------------------------
+exports.inverse = function(p) {
+
+  var rh1, con, ts;
+  var lat, lon;
+  var x = (p.x - this.x0) / this.k0;
+  var y = (this.rh - (p.y - this.y0) / this.k0);
+  if (this.ns > 0) {
+    rh1 = Math.sqrt(x * x + y * y);
+    con = 1;
+  }
+  else {
+    rh1 = -Math.sqrt(x * x + y * y);
+    con = -1;
+  }
+  var theta = 0;
+  if (rh1 !== 0) {
+    theta = Math.atan2((con * x), (con * y));
+  }
+  if ((rh1 !== 0) || (this.ns > 0)) {
+    con = 1 / this.ns;
+    ts = Math.pow((rh1 / (this.a * this.f0)), con);
+    lat = phi2z(this.e, ts);
+    if (lat === -9999) {
+      return null;
+    }
+  }
+  else {
+    lat = -HALF_PI;
+  }
+  lon = adjust_lon(theta / this.ns + this.long0);
+
+  p.x = lon;
+  p.y = lat;
+  return p;
+};
+
+exports.names = ["Lambert Tangential Conformal Conic Projection", "Lambert_Conformal_Conic", "Lambert_Conformal_Conic_2SP", "lcc"];
+
+},{"../common/adjust_lon":48,"../common/msfnz":58,"../common/phi2z":59,"../common/sign":64,"../common/tsfnz":67}],94:[function(require,module,exports){
+exports.init = function() {
+  //no-op for longlat
+};
+
+function identity(pt) {
+  return pt;
+}
+exports.forward = identity;
+exports.inverse = identity;
+exports.names = ["longlat", "identity"];
+
+},{}],95:[function(require,module,exports){
+var msfnz = require('../common/msfnz');
+var HALF_PI = Math.PI/2;
+var EPSLN = 1.0e-10;
+var R2D = 57.29577951308232088;
+var adjust_lon = require('../common/adjust_lon');
+var FORTPI = Math.PI/4;
+var tsfnz = require('../common/tsfnz');
+var phi2z = require('../common/phi2z');
+exports.init = function() {
+  var con = this.b / this.a;
+  this.es = 1 - con * con;
+  if(!('x0' in this)){
+    this.x0 = 0;
+  }
+  if(!('y0' in this)){
+    this.y0 = 0;
+  }
+  this.e = Math.sqrt(this.es);
+  if (this.lat_ts) {
+    if (this.sphere) {
+      this.k0 = Math.cos(this.lat_ts);
+    }
+    else {
+      this.k0 = msfnz(this.e, Math.sin(this.lat_ts), Math.cos(this.lat_ts));
+    }
+  }
+  else {
+    if (!this.k0) {
+      if (this.k) {
+        this.k0 = this.k;
+      }
+      else {
+        this.k0 = 1;
+      }
+    }
+  }
+};
+
+/* Mercator forward equations--mapping lat,long to x,y
+  --------------------------------------------------*/
+
+exports.forward = function(p) {
+  var lon = p.x;
+  var lat = p.y;
+  // convert to radians
+  if (lat * R2D > 90 && lat * R2D < -90 && lon * R2D > 180 && lon * R2D < -180) {
+    return null;
+  }
+
+  var x, y;
+  if (Math.abs(Math.abs(lat) - HALF_PI) <= EPSLN) {
+    return null;
+  }
+  else {
+    if (this.sphere) {
+      x = this.x0 + this.a * this.k0 * adjust_lon(lon - this.long0);
+      y = this.y0 + this.a * this.k0 * Math.log(Math.tan(FORTPI + 0.5 * lat));
+    }
+    else {
+      var sinphi = Math.sin(lat);
+      var ts = tsfnz(this.e, lat, sinphi);
+      x = this.x0 + this.a * this.k0 * adjust_lon(lon - this.long0);
+      y = this.y0 - this.a * this.k0 * Math.log(ts);
+    }
+    p.x = x;
+    p.y = y;
+    return p;
+  }
+};
+
+
+/* Mercator inverse equations--mapping x,y to lat/long
+  --------------------------------------------------*/
+exports.inverse = function(p) {
+
+  var x = p.x - this.x0;
+  var y = p.y - this.y0;
+  var lon, lat;
+
+  if (this.sphere) {
+    lat = HALF_PI - 2 * Math.atan(Math.exp(-y / (this.a * this.k0)));
+  }
+  else {
+    var ts = Math.exp(-y / (this.a * this.k0));
+    lat = phi2z(this.e, ts);
+    if (lat === -9999) {
+      return null;
+    }
+  }
+  lon = adjust_lon(this.long0 + x / (this.a * this.k0));
+
+  p.x = lon;
+  p.y = lat;
+  return p;
+};
+
+exports.names = ["Mercator", "Popular Visualisation Pseudo Mercator", "Mercator_1SP", "Mercator_Auxiliary_Sphere", "merc"];
+
+},{"../common/adjust_lon":48,"../common/msfnz":58,"../common/phi2z":59,"../common/tsfnz":67}],96:[function(require,module,exports){
+var adjust_lon = require('../common/adjust_lon');
+/*
+  reference
+    "New Equal-Area Map Projections for Noncircular Regions", John P. Snyder,
+    The American Cartographer, Vol 15, No. 4, October 1988, pp. 341-355.
+  */
+
+
+/* Initialize the Miller Cylindrical projection
+  -------------------------------------------*/
+exports.init = function() {
+  //no-op
+};
+
+
+/* Miller Cylindrical forward equations--mapping lat,long to x,y
+    ------------------------------------------------------------*/
+exports.forward = function(p) {
+  var lon = p.x;
+  var lat = p.y;
+  /* Forward equations
+      -----------------*/
+  var dlon = adjust_lon(lon - this.long0);
+  var x = this.x0 + this.a * dlon;
+  var y = this.y0 + this.a * Math.log(Math.tan((Math.PI / 4) + (lat / 2.5))) * 1.25;
+
+  p.x = x;
+  p.y = y;
+  return p;
+};
+
+/* Miller Cylindrical inverse equations--mapping x,y to lat/long
+    ------------------------------------------------------------*/
+exports.inverse = function(p) {
+  p.x -= this.x0;
+  p.y -= this.y0;
+
+  var lon = adjust_lon(this.long0 + p.x / this.a);
+  var lat = 2.5 * (Math.atan(Math.exp(0.8 * p.y / this.a)) - Math.PI / 4);
+
+  p.x = lon;
+  p.y = lat;
+  return p;
+};
+exports.names = ["Miller_Cylindrical", "mill"];
+
+},{"../common/adjust_lon":48}],97:[function(require,module,exports){
+var adjust_lon = require('../common/adjust_lon');
+var EPSLN = 1.0e-10;
+exports.init = function() {};
+
+/* Mollweide forward equations--mapping lat,long to x,y
+    ----------------------------------------------------*/
+exports.forward = function(p) {
+
+  /* Forward equations
+      -----------------*/
+  var lon = p.x;
+  var lat = p.y;
+
+  var delta_lon = adjust_lon(lon - this.long0);
+  var theta = lat;
+  var con = Math.PI * Math.sin(lat);
+
+  /* Iterate using the Newton-Raphson method to find theta
+      -----------------------------------------------------*/
+  for (var i = 0; true; i++) {
+    var delta_theta = -(theta + Math.sin(theta) - con) / (1 + Math.cos(theta));
+    theta += delta_theta;
+    if (Math.abs(delta_theta) < EPSLN) {
+      break;
+    }
+  }
+  theta /= 2;
+
+  /* If the latitude is 90 deg, force the x coordinate to be "0 + false easting"
+       this is done here because of precision problems with "cos(theta)"
+       --------------------------------------------------------------------------*/
+  if (Math.PI / 2 - Math.abs(lat) < EPSLN) {
+    delta_lon = 0;
+  }
+  var x = 0.900316316158 * this.a * delta_lon * Math.cos(theta) + this.x0;
+  var y = 1.4142135623731 * this.a * Math.sin(theta) + this.y0;
+
+  p.x = x;
+  p.y = y;
+  return p;
+};
+
+exports.inverse = function(p) {
+  var theta;
+  var arg;
+
+  /* Inverse equations
+      -----------------*/
+  p.x -= this.x0;
+  p.y -= this.y0;
+  arg = p.y / (1.4142135623731 * this.a);
+
+  /* Because of division by zero problems, 'arg' can not be 1.  Therefore
+       a number very close to one is used instead.
+       -------------------------------------------------------------------*/
+  if (Math.abs(arg) > 0.999999999999) {
+    arg = 0.999999999999;
+  }
+  theta = Math.asin(arg);
+  var lon = adjust_lon(this.long0 + (p.x / (0.900316316158 * this.a * Math.cos(theta))));
+  if (lon < (-Math.PI)) {
+    lon = -Math.PI;
+  }
+  if (lon > Math.PI) {
+    lon = Math.PI;
+  }
+  arg = (2 * theta + Math.sin(2 * theta)) / Math.PI;
+  if (Math.abs(arg) > 1) {
+    arg = 1;
+  }
+  var lat = Math.asin(arg);
+
+  p.x = lon;
+  p.y = lat;
+  return p;
+};
+exports.names = ["Mollweide", "moll"];
+
+},{"../common/adjust_lon":48}],98:[function(require,module,exports){
+var SEC_TO_RAD = 4.84813681109535993589914102357e-6;
+/*
+  reference
+    Department of Land and Survey Technical Circular 1973/32
+      http://www.linz.govt.nz/docs/miscellaneous/nz-map-definition.pdf
+    OSG Technical Report 4.1
+      http://www.linz.govt.nz/docs/miscellaneous/nzmg.pdf
+  */
+
+/**
+ * iterations: Number of iterations to refine inverse transform.
+ *     0 -> km accuracy
+ *     1 -> m accuracy -- suitable for most mapping applications
+ *     2 -> mm accuracy
+ */
+exports.iterations = 1;
+
+exports.init = function() {
+  this.A = [];
+  this.A[1] = 0.6399175073;
+  this.A[2] = -0.1358797613;
+  this.A[3] = 0.063294409;
+  this.A[4] = -0.02526853;
+  this.A[5] = 0.0117879;
+  this.A[6] = -0.0055161;
+  this.A[7] = 0.0026906;
+  this.A[8] = -0.001333;
+  this.A[9] = 0.00067;
+  this.A[10] = -0.00034;
+
+  this.B_re = [];
+  this.B_im = [];
+  this.B_re[1] = 0.7557853228;
+  this.B_im[1] = 0;
+  this.B_re[2] = 0.249204646;
+  this.B_im[2] = 0.003371507;
+  this.B_re[3] = -0.001541739;
+  this.B_im[3] = 0.041058560;
+  this.B_re[4] = -0.10162907;
+  this.B_im[4] = 0.01727609;
+  this.B_re[5] = -0.26623489;
+  this.B_im[5] = -0.36249218;
+  this.B_re[6] = -0.6870983;
+  this.B_im[6] = -1.1651967;
+
+  this.C_re = [];
+  this.C_im = [];
+  this.C_re[1] = 1.3231270439;
+  this.C_im[1] = 0;
+  this.C_re[2] = -0.577245789;
+  this.C_im[2] = -0.007809598;
+  this.C_re[3] = 0.508307513;
+  this.C_im[3] = -0.112208952;
+  this.C_re[4] = -0.15094762;
+  this.C_im[4] = 0.18200602;
+  this.C_re[5] = 1.01418179;
+  this.C_im[5] = 1.64497696;
+  this.C_re[6] = 1.9660549;
+  this.C_im[6] = 2.5127645;
+
+  this.D = [];
+  this.D[1] = 1.5627014243;
+  this.D[2] = 0.5185406398;
+  this.D[3] = -0.03333098;
+  this.D[4] = -0.1052906;
+  this.D[5] = -0.0368594;
+  this.D[6] = 0.007317;
+  this.D[7] = 0.01220;
+  this.D[8] = 0.00394;
+  this.D[9] = -0.0013;
+};
+
+/**
+    New Zealand Map Grid Forward  - long/lat to x/y
+    long/lat in radians
+  */
+exports.forward = function(p) {
+  var n;
+  var lon = p.x;
+  var lat = p.y;
+
+  var delta_lat = lat - this.lat0;
+  var delta_lon = lon - this.long0;
+
+  // 1. Calculate d_phi and d_psi    ...                          // and d_lambda
+  // For this algorithm, delta_latitude is in seconds of arc x 10-5, so we need to scale to those units. Longitude is radians.
+  var d_phi = delta_lat / SEC_TO_RAD * 1E-5;
+  var d_lambda = delta_lon;
+  var d_phi_n = 1; // d_phi^0
+
+  var d_psi = 0;
+  for (n = 1; n <= 10; n++) {
+    d_phi_n = d_phi_n * d_phi;
+    d_psi = d_psi + this.A[n] * d_phi_n;
+  }
+
+  // 2. Calculate theta
+  var th_re = d_psi;
+  var th_im = d_lambda;
+
+  // 3. Calculate z
+  var th_n_re = 1;
+  var th_n_im = 0; // theta^0
+  var th_n_re1;
+  var th_n_im1;
+
+  var z_re = 0;
+  var z_im = 0;
+  for (n = 1; n <= 6; n++) {
+    th_n_re1 = th_n_re * th_re - th_n_im * th_im;
+    th_n_im1 = th_n_im * th_re + th_n_re * th_im;
+    th_n_re = th_n_re1;
+    th_n_im = th_n_im1;
+    z_re = z_re + this.B_re[n] * th_n_re - this.B_im[n] * th_n_im;
+    z_im = z_im + this.B_im[n] * th_n_re + this.B_re[n] * th_n_im;
+  }
+
+  // 4. Calculate easting and northing
+  p.x = (z_im * this.a) + this.x0;
+  p.y = (z_re * this.a) + this.y0;
+
+  return p;
+};
 
 
 /**
- * Converts between lat/lon and MGRS coordinates. Note that this static class
- * is restricted to the WGS84 ellipsoid and does not support MGRS notations
- * for polar regions (i.e. above 84° North and below 80° South).
- *
- * If . is loaded, this will be referenced as util.MGRS. If used
- * standalone, it will be referenced as window.MGRS.
- *
- * @static
- */
+    New Zealand Map Grid Inverse  -  x/y to long/lat
+  */
+exports.inverse = function(p) {
+  var n;
+  var x = p.x;
+  var y = p.y;
+
+  var delta_x = x - this.x0;
+  var delta_y = y - this.y0;
+
+  // 1. Calculate z
+  var z_re = delta_y / this.a;
+  var z_im = delta_x / this.a;
+
+  // 2a. Calculate theta - first approximation gives km accuracy
+  var z_n_re = 1;
+  var z_n_im = 0; // z^0
+  var z_n_re1;
+  var z_n_im1;
+
+  var th_re = 0;
+  var th_im = 0;
+  for (n = 1; n <= 6; n++) {
+    z_n_re1 = z_n_re * z_re - z_n_im * z_im;
+    z_n_im1 = z_n_im * z_re + z_n_re * z_im;
+    z_n_re = z_n_re1;
+    z_n_im = z_n_im1;
+    th_re = th_re + this.C_re[n] * z_n_re - this.C_im[n] * z_n_im;
+    th_im = th_im + this.C_im[n] * z_n_re + this.C_re[n] * z_n_im;
+  }
+
+  // 2b. Iterate to refine the accuracy of the calculation
+  //        0 iterations gives km accuracy
+  //        1 iteration gives m accuracy -- good enough for most mapping applications
+  //        2 iterations bives mm accuracy
+  for (var i = 0; i < this.iterations; i++) {
+    var th_n_re = th_re;
+    var th_n_im = th_im;
+    var th_n_re1;
+    var th_n_im1;
+
+    var num_re = z_re;
+    var num_im = z_im;
+    for (n = 2; n <= 6; n++) {
+      th_n_re1 = th_n_re * th_re - th_n_im * th_im;
+      th_n_im1 = th_n_im * th_re + th_n_re * th_im;
+      th_n_re = th_n_re1;
+      th_n_im = th_n_im1;
+      num_re = num_re + (n - 1) * (this.B_re[n] * th_n_re - this.B_im[n] * th_n_im);
+      num_im = num_im + (n - 1) * (this.B_im[n] * th_n_re + this.B_re[n] * th_n_im);
+    }
+
+    th_n_re = 1;
+    th_n_im = 0;
+    var den_re = this.B_re[1];
+    var den_im = this.B_im[1];
+    for (n = 2; n <= 6; n++) {
+      th_n_re1 = th_n_re * th_re - th_n_im * th_im;
+      th_n_im1 = th_n_im * th_re + th_n_re * th_im;
+      th_n_re = th_n_re1;
+      th_n_im = th_n_im1;
+      den_re = den_re + n * (this.B_re[n] * th_n_re - this.B_im[n] * th_n_im);
+      den_im = den_im + n * (this.B_im[n] * th_n_re + this.B_re[n] * th_n_im);
+    }
+
+    // Complex division
+    var den2 = den_re * den_re + den_im * den_im;
+    th_re = (num_re * den_re + num_im * den_im) / den2;
+    th_im = (num_im * den_re - num_re * den_im) / den2;
+  }
+
+  // 3. Calculate d_phi              ...                                    // and d_lambda
+  var d_psi = th_re;
+  var d_lambda = th_im;
+  var d_psi_n = 1; // d_psi^0
+
+  var d_phi = 0;
+  for (n = 1; n <= 9; n++) {
+    d_psi_n = d_psi_n * d_psi;
+    d_phi = d_phi + this.D[n] * d_psi_n;
+  }
+
+  // 4. Calculate latitude and longitude
+  // d_phi is calcuated in second of arc * 10^-5, so we need to scale back to radians. d_lambda is in radians.
+  var lat = this.lat0 + (d_phi * SEC_TO_RAD * 1E5);
+  var lon = this.long0 + d_lambda;
+
+  p.x = lon;
+  p.y = lat;
+
+  return p;
+};
+exports.names = ["New_Zealand_Map_Grid", "nzmg"];
+},{}],99:[function(require,module,exports){
+var tsfnz = require('../common/tsfnz');
+var adjust_lon = require('../common/adjust_lon');
+var phi2z = require('../common/phi2z');
+var HALF_PI = Math.PI/2;
+var FORTPI = Math.PI/4;
+var EPSLN = 1.0e-10;
+
+/* Initialize the Oblique Mercator  projection
+    ------------------------------------------*/
+exports.init = function() {
+  this.no_off = this.no_off || false;
+  this.no_rot = this.no_rot || false;
+
+  if (isNaN(this.k0)) {
+    this.k0 = 1;
+  }
+  var sinlat = Math.sin(this.lat0);
+  var coslat = Math.cos(this.lat0);
+  var con = this.e * sinlat;
+
+  this.bl = Math.sqrt(1 + this.es / (1 - this.es) * Math.pow(coslat, 4));
+  this.al = this.a * this.bl * this.k0 * Math.sqrt(1 - this.es) / (1 - con * con);
+  var t0 = tsfnz(this.e, this.lat0, sinlat);
+  var dl = this.bl / coslat * Math.sqrt((1 - this.es) / (1 - con * con));
+  if (dl * dl < 1) {
+    dl = 1;
+  }
+  var fl;
+  var gl;
+  if (!isNaN(this.longc)) {
+    //Central point and azimuth method
+
+    if (this.lat0 >= 0) {
+      fl = dl + Math.sqrt(dl * dl - 1);
+    }
+    else {
+      fl = dl - Math.sqrt(dl * dl - 1);
+    }
+    this.el = fl * Math.pow(t0, this.bl);
+    gl = 0.5 * (fl - 1 / fl);
+    this.gamma0 = Math.asin(Math.sin(this.alpha) / dl);
+    this.long0 = this.longc - Math.asin(gl * Math.tan(this.gamma0)) / this.bl;
+
+  }
+  else {
+    //2 points method
+    var t1 = tsfnz(this.e, this.lat1, Math.sin(this.lat1));
+    var t2 = tsfnz(this.e, this.lat2, Math.sin(this.lat2));
+    if (this.lat0 >= 0) {
+      this.el = (dl + Math.sqrt(dl * dl - 1)) * Math.pow(t0, this.bl);
+    }
+    else {
+      this.el = (dl - Math.sqrt(dl * dl - 1)) * Math.pow(t0, this.bl);
+    }
+    var hl = Math.pow(t1, this.bl);
+    var ll = Math.pow(t2, this.bl);
+    fl = this.el / hl;
+    gl = 0.5 * (fl - 1 / fl);
+    var jl = (this.el * this.el - ll * hl) / (this.el * this.el + ll * hl);
+    var pl = (ll - hl) / (ll + hl);
+    var dlon12 = adjust_lon(this.long1 - this.long2);
+    this.long0 = 0.5 * (this.long1 + this.long2) - Math.atan(jl * Math.tan(0.5 * this.bl * (dlon12)) / pl) / this.bl;
+    this.long0 = adjust_lon(this.long0);
+    var dlon10 = adjust_lon(this.long1 - this.long0);
+    this.gamma0 = Math.atan(Math.sin(this.bl * (dlon10)) / gl);
+    this.alpha = Math.asin(dl * Math.sin(this.gamma0));
+  }
+
+  if (this.no_off) {
+    this.uc = 0;
+  }
+  else {
+    if (this.lat0 >= 0) {
+      this.uc = this.al / this.bl * Math.atan2(Math.sqrt(dl * dl - 1), Math.cos(this.alpha));
+    }
+    else {
+      this.uc = -1 * this.al / this.bl * Math.atan2(Math.sqrt(dl * dl - 1), Math.cos(this.alpha));
+    }
+  }
+
+};
+
+
+/* Oblique Mercator forward equations--mapping lat,long to x,y
+    ----------------------------------------------------------*/
+exports.forward = function(p) {
+  var lon = p.x;
+  var lat = p.y;
+  var dlon = adjust_lon(lon - this.long0);
+  var us, vs;
+  var con;
+  if (Math.abs(Math.abs(lat) - HALF_PI) <= EPSLN) {
+    if (lat > 0) {
+      con = -1;
+    }
+    else {
+      con = 1;
+    }
+    vs = this.al / this.bl * Math.log(Math.tan(FORTPI + con * this.gamma0 * 0.5));
+    us = -1 * con * HALF_PI * this.al / this.bl;
+  }
+  else {
+    var t = tsfnz(this.e, lat, Math.sin(lat));
+    var ql = this.el / Math.pow(t, this.bl);
+    var sl = 0.5 * (ql - 1 / ql);
+    var tl = 0.5 * (ql + 1 / ql);
+    var vl = Math.sin(this.bl * (dlon));
+    var ul = (sl * Math.sin(this.gamma0) - vl * Math.cos(this.gamma0)) / tl;
+    if (Math.abs(Math.abs(ul) - 1) <= EPSLN) {
+      vs = Number.POSITIVE_INFINITY;
+    }
+    else {
+      vs = 0.5 * this.al * Math.log((1 - ul) / (1 + ul)) / this.bl;
+    }
+    if (Math.abs(Math.cos(this.bl * (dlon))) <= EPSLN) {
+      us = this.al * this.bl * (dlon);
+    }
+    else {
+      us = this.al * Math.atan2(sl * Math.cos(this.gamma0) + vl * Math.sin(this.gamma0), Math.cos(this.bl * dlon)) / this.bl;
+    }
+  }
+
+  if (this.no_rot) {
+    p.x = this.x0 + us;
+    p.y = this.y0 + vs;
+  }
+  else {
+
+    us -= this.uc;
+    p.x = this.x0 + vs * Math.cos(this.alpha) + us * Math.sin(this.alpha);
+    p.y = this.y0 + us * Math.cos(this.alpha) - vs * Math.sin(this.alpha);
+  }
+  return p;
+};
+
+exports.inverse = function(p) {
+  var us, vs;
+  if (this.no_rot) {
+    vs = p.y - this.y0;
+    us = p.x - this.x0;
+  }
+  else {
+    vs = (p.x - this.x0) * Math.cos(this.alpha) - (p.y - this.y0) * Math.sin(this.alpha);
+    us = (p.y - this.y0) * Math.cos(this.alpha) + (p.x - this.x0) * Math.sin(this.alpha);
+    us += this.uc;
+  }
+  var qp = Math.exp(-1 * this.bl * vs / this.al);
+  var sp = 0.5 * (qp - 1 / qp);
+  var tp = 0.5 * (qp + 1 / qp);
+  var vp = Math.sin(this.bl * us / this.al);
+  var up = (vp * Math.cos(this.gamma0) + sp * Math.sin(this.gamma0)) / tp;
+  var ts = Math.pow(this.el / Math.sqrt((1 + up) / (1 - up)), 1 / this.bl);
+  if (Math.abs(up - 1) < EPSLN) {
+    p.x = this.long0;
+    p.y = HALF_PI;
+  }
+  else if (Math.abs(up + 1) < EPSLN) {
+    p.x = this.long0;
+    p.y = -1 * HALF_PI;
+  }
+  else {
+    p.y = phi2z(this.e, ts);
+    p.x = adjust_lon(this.long0 - Math.atan2(sp * Math.cos(this.gamma0) - vp * Math.sin(this.gamma0), Math.cos(this.bl * us / this.al)) / this.bl);
+  }
+  return p;
+};
+
+exports.names = ["Hotine_Oblique_Mercator", "Hotine Oblique Mercator", "Hotine_Oblique_Mercator_Azimuth_Natural_Origin", "Hotine_Oblique_Mercator_Azimuth_Center", "omerc"];
+},{"../common/adjust_lon":48,"../common/phi2z":59,"../common/tsfnz":67}],100:[function(require,module,exports){
+var e0fn = require('../common/e0fn');
+var e1fn = require('../common/e1fn');
+var e2fn = require('../common/e2fn');
+var e3fn = require('../common/e3fn');
+var adjust_lon = require('../common/adjust_lon');
+var adjust_lat = require('../common/adjust_lat');
+var mlfn = require('../common/mlfn');
+var EPSLN = 1.0e-10;
+var gN = require('../common/gN');
+var MAX_ITER = 20;
+exports.init = function() {
+  /* Place parameters in static storage for common use
+      -------------------------------------------------*/
+  this.temp = this.b / this.a;
+  this.es = 1 - Math.pow(this.temp, 2); // devait etre dans tmerc.js mais n y est pas donc je commente sinon retour de valeurs nulles
+  this.e = Math.sqrt(this.es);
+  this.e0 = e0fn(this.es);
+  this.e1 = e1fn(this.es);
+  this.e2 = e2fn(this.es);
+  this.e3 = e3fn(this.es);
+  this.ml0 = this.a * mlfn(this.e0, this.e1, this.e2, this.e3, this.lat0); //si que des zeros le calcul ne se fait pas
+};
+
+
+/* Polyconic forward equations--mapping lat,long to x,y
+    ---------------------------------------------------*/
+exports.forward = function(p) {
+  var lon = p.x;
+  var lat = p.y;
+  var x, y, el;
+  var dlon = adjust_lon(lon - this.long0);
+  el = dlon * Math.sin(lat);
+  if (this.sphere) {
+    if (Math.abs(lat) <= EPSLN) {
+      x = this.a * dlon;
+      y = -1 * this.a * this.lat0;
+    }
+    else {
+      x = this.a * Math.sin(el) / Math.tan(lat);
+      y = this.a * (adjust_lat(lat - this.lat0) + (1 - Math.cos(el)) / Math.tan(lat));
+    }
+  }
+  else {
+    if (Math.abs(lat) <= EPSLN) {
+      x = this.a * dlon;
+      y = -1 * this.ml0;
+    }
+    else {
+      var nl = gN(this.a, this.e, Math.sin(lat)) / Math.tan(lat);
+      x = nl * Math.sin(el);
+      y = this.a * mlfn(this.e0, this.e1, this.e2, this.e3, lat) - this.ml0 + nl * (1 - Math.cos(el));
+    }
+
+  }
+  p.x = x + this.x0;
+  p.y = y + this.y0;
+  return p;
+};
+
+
+/* Inverse equations
+  -----------------*/
+exports.inverse = function(p) {
+  var lon, lat, x, y, i;
+  var al, bl;
+  var phi, dphi;
+  x = p.x - this.x0;
+  y = p.y - this.y0;
+
+  if (this.sphere) {
+    if (Math.abs(y + this.a * this.lat0) <= EPSLN) {
+      lon = adjust_lon(x / this.a + this.long0);
+      lat = 0;
+    }
+    else {
+      al = this.lat0 + y / this.a;
+      bl = x * x / this.a / this.a + al * al;
+      phi = al;
+      var tanphi;
+      for (i = MAX_ITER; i; --i) {
+        tanphi = Math.tan(phi);
+        dphi = -1 * (al * (phi * tanphi + 1) - phi - 0.5 * (phi * phi + bl) * tanphi) / ((phi - al) / tanphi - 1);
+        phi += dphi;
+        if (Math.abs(dphi) <= EPSLN) {
+          lat = phi;
+          break;
+        }
+      }
+      lon = adjust_lon(this.long0 + (Math.asin(x * Math.tan(phi) / this.a)) / Math.sin(lat));
+    }
+  }
+  else {
+    if (Math.abs(y + this.ml0) <= EPSLN) {
+      lat = 0;
+      lon = adjust_lon(this.long0 + x / this.a);
+    }
+    else {
+
+      al = (this.ml0 + y) / this.a;
+      bl = x * x / this.a / this.a + al * al;
+      phi = al;
+      var cl, mln, mlnp, ma;
+      var con;
+      for (i = MAX_ITER; i; --i) {
+        con = this.e * Math.sin(phi);
+        cl = Math.sqrt(1 - con * con) * Math.tan(phi);
+        mln = this.a * mlfn(this.e0, this.e1, this.e2, this.e3, phi);
+        mlnp = this.e0 - 2 * this.e1 * Math.cos(2 * phi) + 4 * this.e2 * Math.cos(4 * phi) - 6 * this.e3 * Math.cos(6 * phi);
+        ma = mln / this.a;
+        dphi = (al * (cl * ma + 1) - ma - 0.5 * cl * (ma * ma + bl)) / (this.es * Math.sin(2 * phi) * (ma * ma + bl - 2 * al * ma) / (4 * cl) + (al - ma) * (cl * mlnp - 2 / Math.sin(2 * phi)) - mlnp);
+        phi -= dphi;
+        if (Math.abs(dphi) <= EPSLN) {
+          lat = phi;
+          break;
+        }
+      }
+
+      //lat=phi4z(this.e,this.e0,this.e1,this.e2,this.e3,al,bl,0,0);
+      cl = Math.sqrt(1 - this.es * Math.pow(Math.sin(lat), 2)) * Math.tan(lat);
+      lon = adjust_lon(this.long0 + Math.asin(x * cl / this.a) / Math.sin(lat));
+    }
+  }
+
+  p.x = lon;
+  p.y = lat;
+  return p;
+};
+exports.names = ["Polyconic", "poly"];
+},{"../common/adjust_lat":47,"../common/adjust_lon":48,"../common/e0fn":50,"../common/e1fn":51,"../common/e2fn":52,"../common/e3fn":53,"../common/gN":54,"../common/mlfn":57}],101:[function(require,module,exports){
+var adjust_lon = require('../common/adjust_lon');
+var adjust_lat = require('../common/adjust_lat');
+var pj_enfn = require('../common/pj_enfn');
+var MAX_ITER = 20;
+var pj_mlfn = require('../common/pj_mlfn');
+var pj_inv_mlfn = require('../common/pj_inv_mlfn');
+var HALF_PI = Math.PI/2;
+var EPSLN = 1.0e-10;
+var asinz = require('../common/asinz');
+exports.init = function() {
+  /* Place parameters in static storage for common use
+    -------------------------------------------------*/
+
+
+  if (!this.sphere) {
+    this.en = pj_enfn(this.es);
+  }
+  else {
+    this.n = 1;
+    this.m = 0;
+    this.es = 0;
+    this.C_y = Math.sqrt((this.m + 1) / this.n);
+    this.C_x = this.C_y / (this.m + 1);
+  }
+
+};
+
+/* Sinusoidal forward equations--mapping lat,long to x,y
+  -----------------------------------------------------*/
+exports.forward = function(p) {
+  var x, y;
+  var lon = p.x;
+  var lat = p.y;
+  /* Forward equations
+    -----------------*/
+  lon = adjust_lon(lon - this.long0);
+
+  if (this.sphere) {
+    if (!this.m) {
+      lat = this.n !== 1 ? Math.asin(this.n * Math.sin(lat)) : lat;
+    }
+    else {
+      var k = this.n * Math.sin(lat);
+      for (var i = MAX_ITER; i; --i) {
+        var V = (this.m * lat + Math.sin(lat) - k) / (this.m + Math.cos(lat));
+        lat -= V;
+        if (Math.abs(V) < EPSLN) {
+          break;
+        }
+      }
+    }
+    x = this.a * this.C_x * lon * (this.m + Math.cos(lat));
+    y = this.a * this.C_y * lat;
+
+  }
+  else {
+
+    var s = Math.sin(lat);
+    var c = Math.cos(lat);
+    y = this.a * pj_mlfn(lat, s, c, this.en);
+    x = this.a * lon * c / Math.sqrt(1 - this.es * s * s);
+  }
+
+  p.x = x;
+  p.y = y;
+  return p;
+};
+
+exports.inverse = function(p) {
+  var lat, temp, lon, s;
+
+  p.x -= this.x0;
+  lon = p.x / this.a;
+  p.y -= this.y0;
+  lat = p.y / this.a;
+
+  if (this.sphere) {
+    lat /= this.C_y;
+    lon = lon / (this.C_x * (this.m + Math.cos(lat)));
+    if (this.m) {
+      lat = asinz((this.m * lat + Math.sin(lat)) / this.n);
+    }
+    else if (this.n !== 1) {
+      lat = asinz(Math.sin(lat) / this.n);
+    }
+    lon = adjust_lon(lon + this.long0);
+    lat = adjust_lat(lat);
+  }
+  else {
+    lat = pj_inv_mlfn(p.y / this.a, this.es, this.en);
+    s = Math.abs(lat);
+    if (s < HALF_PI) {
+      s = Math.sin(lat);
+      temp = this.long0 + p.x * Math.sqrt(1 - this.es * s * s) / (this.a * Math.cos(lat));
+      //temp = this.long0 + p.x / (this.a * Math.cos(lat));
+      lon = adjust_lon(temp);
+    }
+    else if ((s - EPSLN) < HALF_PI) {
+      lon = this.long0;
+    }
+  }
+  p.x = lon;
+  p.y = lat;
+  return p;
+};
+exports.names = ["Sinusoidal", "sinu"];
+},{"../common/adjust_lat":47,"../common/adjust_lon":48,"../common/asinz":49,"../common/pj_enfn":60,"../common/pj_inv_mlfn":61,"../common/pj_mlfn":62}],102:[function(require,module,exports){
+/*
+  references:
+    Formules et constantes pour le Calcul pour la
+    projection cylindrique conforme à axe oblique et pour la transformation entre
+    des systèmes de référence.
+    http://www.swisstopo.admin.ch/internet/swisstopo/fr/home/topics/survey/sys/refsys/switzerland.parsysrelated1.31216.downloadList.77004.DownloadFile.tmp/swissprojectionfr.pdf
+  */
+exports.init = function() {
+  var phy0 = this.lat0;
+  this.lambda0 = this.long0;
+  var sinPhy0 = Math.sin(phy0);
+  var semiMajorAxis = this.a;
+  var invF = this.rf;
+  var flattening = 1 / invF;
+  var e2 = 2 * flattening - Math.pow(flattening, 2);
+  var e = this.e = Math.sqrt(e2);
+  this.R = this.k0 * semiMajorAxis * Math.sqrt(1 - e2) / (1 - e2 * Math.pow(sinPhy0, 2));
+  this.alpha = Math.sqrt(1 + e2 / (1 - e2) * Math.pow(Math.cos(phy0), 4));
+  this.b0 = Math.asin(sinPhy0 / this.alpha);
+  var k1 = Math.log(Math.tan(Math.PI / 4 + this.b0 / 2));
+  var k2 = Math.log(Math.tan(Math.PI / 4 + phy0 / 2));
+  var k3 = Math.log((1 + e * sinPhy0) / (1 - e * sinPhy0));
+  this.K = k1 - this.alpha * k2 + this.alpha * e / 2 * k3;
+};
+
+
+exports.forward = function(p) {
+  var Sa1 = Math.log(Math.tan(Math.PI / 4 - p.y / 2));
+  var Sa2 = this.e / 2 * Math.log((1 + this.e * Math.sin(p.y)) / (1 - this.e * Math.sin(p.y)));
+  var S = -this.alpha * (Sa1 + Sa2) + this.K;
+
+  // spheric latitude
+  var b = 2 * (Math.atan(Math.exp(S)) - Math.PI / 4);
+
+  // spheric longitude
+  var I = this.alpha * (p.x - this.lambda0);
+
+  // psoeudo equatorial rotation
+  var rotI = Math.atan(Math.sin(I) / (Math.sin(this.b0) * Math.tan(b) + Math.cos(this.b0) * Math.cos(I)));
+
+  var rotB = Math.asin(Math.cos(this.b0) * Math.sin(b) - Math.sin(this.b0) * Math.cos(b) * Math.cos(I));
+
+  p.y = this.R / 2 * Math.log((1 + Math.sin(rotB)) / (1 - Math.sin(rotB))) + this.y0;
+  p.x = this.R * rotI + this.x0;
+  return p;
+};
+
+exports.inverse = function(p) {
+  var Y = p.x - this.x0;
+  var X = p.y - this.y0;
+
+  var rotI = Y / this.R;
+  var rotB = 2 * (Math.atan(Math.exp(X / this.R)) - Math.PI / 4);
+
+  var b = Math.asin(Math.cos(this.b0) * Math.sin(rotB) + Math.sin(this.b0) * Math.cos(rotB) * Math.cos(rotI));
+  var I = Math.atan(Math.sin(rotI) / (Math.cos(this.b0) * Math.cos(rotI) - Math.sin(this.b0) * Math.tan(rotB)));
+
+  var lambda = this.lambda0 + I / this.alpha;
+
+  var S = 0;
+  var phy = b;
+  var prevPhy = -1000;
+  var iteration = 0;
+  while (Math.abs(phy - prevPhy) > 0.0000001) {
+    if (++iteration > 20) {
+      //...reportError("omercFwdInfinity");
+      return;
+    }
+    //S = Math.log(Math.tan(Math.PI / 4 + phy / 2));
+    S = 1 / this.alpha * (Math.log(Math.tan(Math.PI / 4 + b / 2)) - this.K) + this.e * Math.log(Math.tan(Math.PI / 4 + Math.asin(this.e * Math.sin(phy)) / 2));
+    prevPhy = phy;
+    phy = 2 * Math.atan(Math.exp(S)) - Math.PI / 2;
+  }
+
+  p.x = lambda;
+  p.y = phy;
+  return p;
+};
+
+exports.names = ["somerc"];
+
+},{}],103:[function(require,module,exports){
+var HALF_PI = Math.PI/2;
+var EPSLN = 1.0e-10;
+var sign = require('../common/sign');
+var msfnz = require('../common/msfnz');
+var tsfnz = require('../common/tsfnz');
+var phi2z = require('../common/phi2z');
+var adjust_lon = require('../common/adjust_lon');
+exports.ssfn_ = function(phit, sinphi, eccen) {
+  sinphi *= eccen;
+  return (Math.tan(0.5 * (HALF_PI + phit)) * Math.pow((1 - sinphi) / (1 + sinphi), 0.5 * eccen));
+};
+
+exports.init = function() {
+  this.coslat0 = Math.cos(this.lat0);
+  this.sinlat0 = Math.sin(this.lat0);
+  if (this.sphere) {
+    if (this.k0 === 1 && !isNaN(this.lat_ts) && Math.abs(this.coslat0) <= EPSLN) {
+      this.k0 = 0.5 * (1 + sign(this.lat0) * Math.sin(this.lat_ts));
+    }
+  }
+  else {
+    if (Math.abs(this.coslat0) <= EPSLN) {
+      if (this.lat0 > 0) {
+        //North pole
+        //trace('stere:north pole');
+        this.con = 1;
+      }
+      else {
+        //South pole
+        //trace('stere:south pole');
+        this.con = -1;
+      }
+    }
+    this.cons = Math.sqrt(Math.pow(1 + this.e, 1 + this.e) * Math.pow(1 - this.e, 1 - this.e));
+    if (this.k0 === 1 && !isNaN(this.lat_ts) && Math.abs(this.coslat0) <= EPSLN) {
+      this.k0 = 0.5 * this.cons * msfnz(this.e, Math.sin(this.lat_ts), Math.cos(this.lat_ts)) / tsfnz(this.e, this.con * this.lat_ts, this.con * Math.sin(this.lat_ts));
+    }
+    this.ms1 = msfnz(this.e, this.sinlat0, this.coslat0);
+    this.X0 = 2 * Math.atan(this.ssfn_(this.lat0, this.sinlat0, this.e)) - HALF_PI;
+    this.cosX0 = Math.cos(this.X0);
+    this.sinX0 = Math.sin(this.X0);
+  }
+};
+
+// Stereographic forward equations--mapping lat,long to x,y
+exports.forward = function(p) {
+  var lon = p.x;
+  var lat = p.y;
+  var sinlat = Math.sin(lat);
+  var coslat = Math.cos(lat);
+  var A, X, sinX, cosX, ts, rh;
+  var dlon = adjust_lon(lon - this.long0);
+
+  if (Math.abs(Math.abs(lon - this.long0) - Math.PI) <= EPSLN && Math.abs(lat + this.lat0) <= EPSLN) {
+    //case of the origine point
+    //trace('stere:this is the origin point');
+    p.x = NaN;
+    p.y = NaN;
+    return p;
+  }
+  if (this.sphere) {
+    //trace('stere:sphere case');
+    A = 2 * this.k0 / (1 + this.sinlat0 * sinlat + this.coslat0 * coslat * Math.cos(dlon));
+    p.x = this.a * A * coslat * Math.sin(dlon) + this.x0;
+    p.y = this.a * A * (this.coslat0 * sinlat - this.sinlat0 * coslat * Math.cos(dlon)) + this.y0;
+    return p;
+  }
+  else {
+    X = 2 * Math.atan(this.ssfn_(lat, sinlat, this.e)) - HALF_PI;
+    cosX = Math.cos(X);
+    sinX = Math.sin(X);
+    if (Math.abs(this.coslat0) <= EPSLN) {
+      ts = tsfnz(this.e, lat * this.con, this.con * sinlat);
+      rh = 2 * this.a * this.k0 * ts / this.cons;
+      p.x = this.x0 + rh * Math.sin(lon - this.long0);
+      p.y = this.y0 - this.con * rh * Math.cos(lon - this.long0);
+      //trace(p.toString());
+      return p;
+    }
+    else if (Math.abs(this.sinlat0) < EPSLN) {
+      //Eq
+      //trace('stere:equateur');
+      A = 2 * this.a * this.k0 / (1 + cosX * Math.cos(dlon));
+      p.y = A * sinX;
+    }
+    else {
+      //other case
+      //trace('stere:normal case');
+      A = 2 * this.a * this.k0 * this.ms1 / (this.cosX0 * (1 + this.sinX0 * sinX + this.cosX0 * cosX * Math.cos(dlon)));
+      p.y = A * (this.cosX0 * sinX - this.sinX0 * cosX * Math.cos(dlon)) + this.y0;
+    }
+    p.x = A * cosX * Math.sin(dlon) + this.x0;
+  }
+  //trace(p.toString());
+  return p;
+};
+
+
+//* Stereographic inverse equations--mapping x,y to lat/long
+exports.inverse = function(p) {
+  p.x -= this.x0;
+  p.y -= this.y0;
+  var lon, lat, ts, ce, Chi;
+  var rh = Math.sqrt(p.x * p.x + p.y * p.y);
+  if (this.sphere) {
+    var c = 2 * Math.atan(rh / (0.5 * this.a * this.k0));
+    lon = this.long0;
+    lat = this.lat0;
+    if (rh <= EPSLN) {
+      p.x = lon;
+      p.y = lat;
+      return p;
+    }
+    lat = Math.asin(Math.cos(c) * this.sinlat0 + p.y * Math.sin(c) * this.coslat0 / rh);
+    if (Math.abs(this.coslat0) < EPSLN) {
+      if (this.lat0 > 0) {
+        lon = adjust_lon(this.long0 + Math.atan2(p.x, - 1 * p.y));
+      }
+      else {
+        lon = adjust_lon(this.long0 + Math.atan2(p.x, p.y));
+      }
+    }
+    else {
+      lon = adjust_lon(this.long0 + Math.atan2(p.x * Math.sin(c), rh * this.coslat0 * Math.cos(c) - p.y * this.sinlat0 * Math.sin(c)));
+    }
+    p.x = lon;
+    p.y = lat;
+    return p;
+  }
+  else {
+    if (Math.abs(this.coslat0) <= EPSLN) {
+      if (rh <= EPSLN) {
+        lat = this.lat0;
+        lon = this.long0;
+        p.x = lon;
+        p.y = lat;
+        //trace(p.toString());
+        return p;
+      }
+      p.x *= this.con;
+      p.y *= this.con;
+      ts = rh * this.cons / (2 * this.a * this.k0);
+      lat = this.con * phi2z(this.e, ts);
+      lon = this.con * adjust_lon(this.con * this.long0 + Math.atan2(p.x, - 1 * p.y));
+    }
+    else {
+      ce = 2 * Math.atan(rh * this.cosX0 / (2 * this.a * this.k0 * this.ms1));
+      lon = this.long0;
+      if (rh <= EPSLN) {
+        Chi = this.X0;
+      }
+      else {
+        Chi = Math.asin(Math.cos(ce) * this.sinX0 + p.y * Math.sin(ce) * this.cosX0 / rh);
+        lon = adjust_lon(this.long0 + Math.atan2(p.x * Math.sin(ce), rh * this.cosX0 * Math.cos(ce) - p.y * this.sinX0 * Math.sin(ce)));
+      }
+      lat = -1 * phi2z(this.e, Math.tan(0.5 * (HALF_PI + Chi)));
+    }
+  }
+  p.x = lon;
+  p.y = lat;
+
+  //trace(p.toString());
+  return p;
+
+};
+exports.names = ["stere"];
+},{"../common/adjust_lon":48,"../common/msfnz":58,"../common/phi2z":59,"../common/sign":64,"../common/tsfnz":67}],104:[function(require,module,exports){
+var gauss = require('./gauss');
+var adjust_lon = require('../common/adjust_lon');
+exports.init = function() {
+  gauss.init.apply(this);
+  if (!this.rc) {
+    return;
+  }
+  this.sinc0 = Math.sin(this.phic0);
+  this.cosc0 = Math.cos(this.phic0);
+  this.R2 = 2 * this.rc;
+  if (!this.title) {
+    this.title = "Oblique Stereographic Alternative";
+  }
+};
+
+exports.forward = function(p) {
+  var sinc, cosc, cosl, k;
+  p.x = adjust_lon(p.x - this.long0);
+  gauss.forward.apply(this, [p]);
+  sinc = Math.sin(p.y);
+  cosc = Math.cos(p.y);
+  cosl = Math.cos(p.x);
+  k = this.k0 * this.R2 / (1 + this.sinc0 * sinc + this.cosc0 * cosc * cosl);
+  p.x = k * cosc * Math.sin(p.x);
+  p.y = k * (this.cosc0 * sinc - this.sinc0 * cosc * cosl);
+  p.x = this.a * p.x + this.x0;
+  p.y = this.a * p.y + this.y0;
+  return p;
+};
+
+exports.inverse = function(p) {
+  var sinc, cosc, lon, lat, rho;
+  p.x = (p.x - this.x0) / this.a;
+  p.y = (p.y - this.y0) / this.a;
+
+  p.x /= this.k0;
+  p.y /= this.k0;
+  if ((rho = Math.sqrt(p.x * p.x + p.y * p.y))) {
+    var c = 2 * Math.atan2(rho, this.R2);
+    sinc = Math.sin(c);
+    cosc = Math.cos(c);
+    lat = Math.asin(cosc * this.sinc0 + p.y * sinc * this.cosc0 / rho);
+    lon = Math.atan2(p.x * sinc, rho * this.cosc0 * cosc - p.y * this.sinc0 * sinc);
+  }
+  else {
+    lat = this.phic0;
+    lon = 0;
+  }
+
+  p.x = lon;
+  p.y = lat;
+  gauss.inverse.apply(this, [p]);
+  p.x = adjust_lon(p.x + this.long0);
+  return p;
+};
+
+exports.names = ["Stereographic_North_Pole", "Oblique_Stereographic", "Polar_Stereographic", "sterea","Oblique Stereographic Alternative"];
+
+},{"../common/adjust_lon":48,"./gauss":89}],105:[function(require,module,exports){
+var e0fn = require('../common/e0fn');
+var e1fn = require('../common/e1fn');
+var e2fn = require('../common/e2fn');
+var e3fn = require('../common/e3fn');
+var mlfn = require('../common/mlfn');
+var adjust_lon = require('../common/adjust_lon');
+var HALF_PI = Math.PI/2;
+var EPSLN = 1.0e-10;
+var sign = require('../common/sign');
+var asinz = require('../common/asinz');
+
+exports.init = function() {
+  this.e0 = e0fn(this.es);
+  this.e1 = e1fn(this.es);
+  this.e2 = e2fn(this.es);
+  this.e3 = e3fn(this.es);
+  this.ml0 = this.a * mlfn(this.e0, this.e1, this.e2, this.e3, this.lat0);
+};
+
+/**
+    Transverse Mercator Forward  - long/lat to x/y
+    long/lat in radians
+  */
+exports.forward = function(p) {
+  var lon = p.x;
+  var lat = p.y;
+
+  var delta_lon = adjust_lon(lon - this.long0);
+  var con;
+  var x, y;
+  var sin_phi = Math.sin(lat);
+  var cos_phi = Math.cos(lat);
+
+  if (this.sphere) {
+    var b = cos_phi * Math.sin(delta_lon);
+    if ((Math.abs(Math.abs(b) - 1)) < 0.0000000001) {
+      return (93);
+    }
+    else {
+      x = 0.5 * this.a * this.k0 * Math.log((1 + b) / (1 - b));
+      con = Math.acos(cos_phi * Math.cos(delta_lon) / Math.sqrt(1 - b * b));
+      if (lat < 0) {
+        con = -con;
+      }
+      y = this.a * this.k0 * (con - this.lat0);
+    }
+  }
+  else {
+    var al = cos_phi * delta_lon;
+    var als = Math.pow(al, 2);
+    var c = this.ep2 * Math.pow(cos_phi, 2);
+    var tq = Math.tan(lat);
+    var t = Math.pow(tq, 2);
+    con = 1 - this.es * Math.pow(sin_phi, 2);
+    var n = this.a / Math.sqrt(con);
+    var ml = this.a * mlfn(this.e0, this.e1, this.e2, this.e3, lat);
+
+    x = this.k0 * n * al * (1 + als / 6 * (1 - t + c + als / 20 * (5 - 18 * t + Math.pow(t, 2) + 72 * c - 58 * this.ep2))) + this.x0;
+    y = this.k0 * (ml - this.ml0 + n * tq * (als * (0.5 + als / 24 * (5 - t + 9 * c + 4 * Math.pow(c, 2) + als / 30 * (61 - 58 * t + Math.pow(t, 2) + 600 * c - 330 * this.ep2))))) + this.y0;
+
+  }
+  p.x = x;
+  p.y = y;
+  return p;
+};
+
+/**
+    Transverse Mercator Inverse  -  x/y to long/lat
+  */
+exports.inverse = function(p) {
+  var con, phi;
+  var delta_phi;
+  var i;
+  var max_iter = 6;
+  var lat, lon;
+
+  if (this.sphere) {
+    var f = Math.exp(p.x / (this.a * this.k0));
+    var g = 0.5 * (f - 1 / f);
+    var temp = this.lat0 + p.y / (this.a * this.k0);
+    var h = Math.cos(temp);
+    con = Math.sqrt((1 - h * h) / (1 + g * g));
+    lat = asinz(con);
+    if (temp < 0) {
+      lat = -lat;
+    }
+    if ((g === 0) && (h === 0)) {
+      lon = this.long0;
+    }
+    else {
+      lon = adjust_lon(Math.atan2(g, h) + this.long0);
+    }
+  }
+  else { // ellipsoidal form
+    var x = p.x - this.x0;
+    var y = p.y - this.y0;
+
+    con = (this.ml0 + y / this.k0) / this.a;
+    phi = con;
+    for (i = 0; true; i++) {
+      delta_phi = ((con + this.e1 * Math.sin(2 * phi) - this.e2 * Math.sin(4 * phi) + this.e3 * Math.sin(6 * phi)) / this.e0) - phi;
+      phi += delta_phi;
+      if (Math.abs(delta_phi) <= EPSLN) {
+        break;
+      }
+      if (i >= max_iter) {
+        return (95);
+      }
+    } // for()
+    if (Math.abs(phi) < HALF_PI) {
+      var sin_phi = Math.sin(phi);
+      var cos_phi = Math.cos(phi);
+      var tan_phi = Math.tan(phi);
+      var c = this.ep2 * Math.pow(cos_phi, 2);
+      var cs = Math.pow(c, 2);
+      var t = Math.pow(tan_phi, 2);
+      var ts = Math.pow(t, 2);
+      con = 1 - this.es * Math.pow(sin_phi, 2);
+      var n = this.a / Math.sqrt(con);
+      var r = n * (1 - this.es) / con;
+      var d = x / (n * this.k0);
+      var ds = Math.pow(d, 2);
+      lat = phi - (n * tan_phi * ds / r) * (0.5 - ds / 24 * (5 + 3 * t + 10 * c - 4 * cs - 9 * this.ep2 - ds / 30 * (61 + 90 * t + 298 * c + 45 * ts - 252 * this.ep2 - 3 * cs)));
+      lon = adjust_lon(this.long0 + (d * (1 - ds / 6 * (1 + 2 * t + c - ds / 20 * (5 - 2 * c + 28 * t - 3 * cs + 8 * this.ep2 + 24 * ts))) / cos_phi));
+    }
+    else {
+      lat = HALF_PI * sign(y);
+      lon = this.long0;
+    }
+  }
+  p.x = lon;
+  p.y = lat;
+  return p;
+};
+exports.names = ["Transverse_Mercator", "Transverse Mercator", "tmerc"];
+
+},{"../common/adjust_lon":48,"../common/asinz":49,"../common/e0fn":50,"../common/e1fn":51,"../common/e2fn":52,"../common/e3fn":53,"../common/mlfn":57,"../common/sign":64}],106:[function(require,module,exports){
+var D2R = 0.01745329251994329577;
+var tmerc = require('./tmerc');
+exports.dependsOn = 'tmerc';
+exports.init = function() {
+  if (!this.zone) {
+    return;
+  }
+  this.lat0 = 0;
+  this.long0 = ((6 * Math.abs(this.zone)) - 183) * D2R;
+  this.x0 = 500000;
+  this.y0 = this.utmSouth ? 10000000 : 0;
+  this.k0 = 0.9996;
+
+  tmerc.init.apply(this);
+  this.forward = tmerc.forward;
+  this.inverse = tmerc.inverse;
+};
+exports.names = ["Universal Transverse Mercator System", "utm"];
+
+},{"./tmerc":105}],107:[function(require,module,exports){
+var adjust_lon = require('../common/adjust_lon');
+var HALF_PI = Math.PI/2;
+var EPSLN = 1.0e-10;
+var asinz = require('../common/asinz');
+/* Initialize the Van Der Grinten projection
+  ----------------------------------------*/
+exports.init = function() {
+  //this.R = 6370997; //Radius of earth
+  this.R = this.a;
+};
+
+exports.forward = function(p) {
+
+  var lon = p.x;
+  var lat = p.y;
+
+  /* Forward equations
+    -----------------*/
+  var dlon = adjust_lon(lon - this.long0);
+  var x, y;
+
+  if (Math.abs(lat) <= EPSLN) {
+    x = this.x0 + this.R * dlon;
+    y = this.y0;
+  }
+  var theta = asinz(2 * Math.abs(lat / Math.PI));
+  if ((Math.abs(dlon) <= EPSLN) || (Math.abs(Math.abs(lat) - HALF_PI) <= EPSLN)) {
+    x = this.x0;
+    if (lat >= 0) {
+      y = this.y0 + Math.PI * this.R * Math.tan(0.5 * theta);
+    }
+    else {
+      y = this.y0 + Math.PI * this.R * -Math.tan(0.5 * theta);
+    }
+    //  return(OK);
+  }
+  var al = 0.5 * Math.abs((Math.PI / dlon) - (dlon / Math.PI));
+  var asq = al * al;
+  var sinth = Math.sin(theta);
+  var costh = Math.cos(theta);
+
+  var g = costh / (sinth + costh - 1);
+  var gsq = g * g;
+  var m = g * (2 / sinth - 1);
+  var msq = m * m;
+  var con = Math.PI * this.R * (al * (g - msq) + Math.sqrt(asq * (g - msq) * (g - msq) - (msq + asq) * (gsq - msq))) / (msq + asq);
+  if (dlon < 0) {
+    con = -con;
+  }
+  x = this.x0 + con;
+  //con = Math.abs(con / (Math.PI * this.R));
+  var q = asq + g;
+  con = Math.PI * this.R * (m * q - al * Math.sqrt((msq + asq) * (asq + 1) - q * q)) / (msq + asq);
+  if (lat >= 0) {
+    //y = this.y0 + Math.PI * this.R * Math.sqrt(1 - con * con - 2 * al * con);
+    y = this.y0 + con;
+  }
+  else {
+    //y = this.y0 - Math.PI * this.R * Math.sqrt(1 - con * con - 2 * al * con);
+    y = this.y0 - con;
+  }
+  p.x = x;
+  p.y = y;
+  return p;
+};
+
+/* Van Der Grinten inverse equations--mapping x,y to lat/long
+  ---------------------------------------------------------*/
+exports.inverse = function(p) {
+  var lon, lat;
+  var xx, yy, xys, c1, c2, c3;
+  var a1;
+  var m1;
+  var con;
+  var th1;
+  var d;
+
+  /* inverse equations
+    -----------------*/
+  p.x -= this.x0;
+  p.y -= this.y0;
+  con = Math.PI * this.R;
+  xx = p.x / con;
+  yy = p.y / con;
+  xys = xx * xx + yy * yy;
+  c1 = -Math.abs(yy) * (1 + xys);
+  c2 = c1 - 2 * yy * yy + xx * xx;
+  c3 = -2 * c1 + 1 + 2 * yy * yy + xys * xys;
+  d = yy * yy / c3 + (2 * c2 * c2 * c2 / c3 / c3 / c3 - 9 * c1 * c2 / c3 / c3) / 27;
+  a1 = (c1 - c2 * c2 / 3 / c3) / c3;
+  m1 = 2 * Math.sqrt(-a1 / 3);
+  con = ((3 * d) / a1) / m1;
+  if (Math.abs(con) > 1) {
+    if (con >= 0) {
+      con = 1;
+    }
+    else {
+      con = -1;
+    }
+  }
+  th1 = Math.acos(con) / 3;
+  if (p.y >= 0) {
+    lat = (-m1 * Math.cos(th1 + Math.PI / 3) - c2 / 3 / c3) * Math.PI;
+  }
+  else {
+    lat = -(-m1 * Math.cos(th1 + Math.PI / 3) - c2 / 3 / c3) * Math.PI;
+  }
+
+  if (Math.abs(xx) < EPSLN) {
+    lon = this.long0;
+  }
+  else {
+    lon = adjust_lon(this.long0 + Math.PI * (xys - 1 + Math.sqrt(1 + 2 * (xx * xx - yy * yy) + xys * xys)) / 2 / xx);
+  }
+
+  p.x = lon;
+  p.y = lat;
+  return p;
+};
+exports.names = ["Van_der_Grinten_I", "VanDerGrinten", "vandg"];
+},{"../common/adjust_lon":48,"../common/asinz":49}],108:[function(require,module,exports){
+var D2R = 0.01745329251994329577;
+var R2D = 57.29577951308232088;
+var PJD_3PARAM = 1;
+var PJD_7PARAM = 2;
+var datum_transform = require('./datum_transform');
+var adjust_axis = require('./adjust_axis');
+var proj = require('./Proj');
+var toPoint = require('./common/toPoint');
+module.exports = function transform(source, dest, point) {
+  var wgs84;
+  if (Array.isArray(point)) {
+    point = toPoint(point);
+  }
+  function checkNotWGS(source, dest) {
+    return ((source.datum.datum_type === PJD_3PARAM || source.datum.datum_type === PJD_7PARAM) && dest.datumCode !== "WGS84");
+  }
+
+  // Workaround for datum shifts towgs84, if either source or destination projection is not wgs84
+  if (source.datum && dest.datum && (checkNotWGS(source, dest) || checkNotWGS(dest, source))) {
+    wgs84 = new proj('WGS84');
+    transform(source, wgs84, point);
+    source = wgs84;
+  }
+  // DGR, 2010/11/12
+  if (source.axis !== "enu") {
+    adjust_axis(source, false, point);
+  }
+  // Transform source points to long/lat, if they aren't already.
+  if (source.projName === "longlat") {
+    point.x *= D2R; // convert degrees to radians
+    point.y *= D2R;
+  }
+  else {
+    if (source.to_meter) {
+      point.x *= source.to_meter;
+      point.y *= source.to_meter;
+    }
+    source.inverse(point); // Convert Cartesian to longlat
+  }
+  // Adjust for the prime meridian if necessary
+  if (source.from_greenwich) {
+    point.x += source.from_greenwich;
+  }
+
+  // Convert datums if needed, and if possible.
+  point = datum_transform(source.datum, dest.datum, point);
+
+  // Adjust for the prime meridian if necessary
+  if (dest.from_greenwich) {
+    point.x -= dest.from_greenwich;
+  }
+
+  if (dest.projName === "longlat") {
+    // convert radians to decimal degrees
+    point.x *= R2D;
+    point.y *= R2D;
+  }
+  else { // else project
+    dest.forward(point);
+    if (dest.to_meter) {
+      point.x /= dest.to_meter;
+      point.y /= dest.to_meter;
+    }
+  }
+
+  // DGR, 2010/11/12
+  if (dest.axis !== "enu") {
+    adjust_axis(dest, true, point);
+  }
+
+  return point;
+};
+},{"./Proj":45,"./adjust_axis":46,"./common/toPoint":66,"./datum_transform":73}],109:[function(require,module,exports){
+var D2R = 0.01745329251994329577;
+var extend = require('./extend');
+
+function mapit(obj, key, v) {
+  obj[key] = v.map(function(aa) {
+    var o = {};
+    sExpr(aa, o);
+    return o;
+  }).reduce(function(a, b) {
+    return extend(a, b);
+  }, {});
+}
+
+function sExpr(v, obj) {
+  var key;
+  if (!Array.isArray(v)) {
+    obj[v] = true;
+    return;
+  }
+  else {
+    key = v.shift();
+    if (key === 'PARAMETER') {
+      key = v.shift();
+    }
+    if (v.length === 1) {
+      if (Array.isArray(v[0])) {
+        obj[key] = {};
+        sExpr(v[0], obj[key]);
+      }
+      else {
+        obj[key] = v[0];
+      }
+    }
+    else if (!v.length) {
+      obj[key] = true;
+    }
+    else if (key === 'TOWGS84') {
+      obj[key] = v;
+    }
+    else {
+      obj[key] = {};
+      if (['UNIT', 'PRIMEM', 'VERT_DATUM'].indexOf(key) > -1) {
+        obj[key] = {
+          name: v[0].toLowerCase(),
+          convert: v[1]
+        };
+        if (v.length === 3) {
+          obj[key].auth = v[2];
+        }
+      }
+      else if (key === 'SPHEROID') {
+        obj[key] = {
+          name: v[0],
+          a: v[1],
+          rf: v[2]
+        };
+        if (v.length === 4) {
+          obj[key].auth = v[3];
+        }
+      }
+      else if (['GEOGCS', 'GEOCCS', 'DATUM', 'VERT_CS', 'COMPD_CS', 'LOCAL_CS', 'FITTED_CS', 'LOCAL_DATUM'].indexOf(key) > -1) {
+        v[0] = ['name', v[0]];
+        mapit(obj, key, v);
+      }
+      else if (v.every(function(aa) {
+        return Array.isArray(aa);
+      })) {
+        mapit(obj, key, v);
+      }
+      else {
+        sExpr(v, obj[key]);
+      }
+    }
+  }
+}
+
+function rename(obj, params) {
+  var outName = params[0];
+  var inName = params[1];
+  if (!(outName in obj) && (inName in obj)) {
+    obj[outName] = obj[inName];
+    if (params.length === 3) {
+      obj[outName] = params[2](obj[outName]);
+    }
+  }
+}
+
+function d2r(input) {
+  return input * D2R;
+}
+
+function cleanWKT(wkt) {
+  if (wkt.type === 'GEOGCS') {
+    wkt.projName = 'longlat';
+  }
+  else if (wkt.type === 'LOCAL_CS') {
+    wkt.projName = 'identity';
+    wkt.local = true;
+  }
+  else {
+    if (typeof wkt.PROJECTION === "object") {
+      wkt.projName = Object.keys(wkt.PROJECTION)[0];
+    }
+    else {
+      wkt.projName = wkt.PROJECTION;
+    }
+  }
+  if (wkt.UNIT) {
+    wkt.units = wkt.UNIT.name.toLowerCase();
+    if (wkt.units === 'metre') {
+      wkt.units = 'meter';
+    }
+    if (wkt.UNIT.convert) {
+      wkt.to_meter = parseFloat(wkt.UNIT.convert, 10);
+    }
+  }
+
+  if (wkt.GEOGCS) {
+    //if(wkt.GEOGCS.PRIMEM&&wkt.GEOGCS.PRIMEM.convert){
+    //  wkt.from_greenwich=wkt.GEOGCS.PRIMEM.convert*D2R;
+    //}
+    if (wkt.GEOGCS.DATUM) {
+      wkt.datumCode = wkt.GEOGCS.DATUM.name.toLowerCase();
+    }
+    else {
+      wkt.datumCode = wkt.GEOGCS.name.toLowerCase();
+    }
+    if (wkt.datumCode.slice(0, 2) === 'd_') {
+      wkt.datumCode = wkt.datumCode.slice(2);
+    }
+    if (wkt.datumCode === 'new_zealand_geodetic_datum_1949' || wkt.datumCode === 'new_zealand_1949') {
+      wkt.datumCode = 'nzgd49';
+    }
+    if (wkt.datumCode === "wgs_1984") {
+      if (wkt.PROJECTION === 'Mercator_Auxiliary_Sphere') {
+        wkt.sphere = true;
+      }
+      wkt.datumCode = 'wgs84';
+    }
+    if (wkt.datumCode.slice(-6) === '_ferro') {
+      wkt.datumCode = wkt.datumCode.slice(0, - 6);
+    }
+    if (wkt.datumCode.slice(-8) === '_jakarta') {
+      wkt.datumCode = wkt.datumCode.slice(0, - 8);
+    }
+    if (~wkt.datumCode.indexOf('belge')) {
+      wkt.datumCode = "rnb72";
+    }
+    if (wkt.GEOGCS.DATUM && wkt.GEOGCS.DATUM.SPHEROID) {
+      wkt.ellps = wkt.GEOGCS.DATUM.SPHEROID.name.replace('_19', '').replace(/[Cc]larke\_18/, 'clrk');
+      if (wkt.ellps.toLowerCase().slice(0, 13) === "international") {
+        wkt.ellps = 'intl';
+      }
+
+      wkt.a = wkt.GEOGCS.DATUM.SPHEROID.a;
+      wkt.rf = parseFloat(wkt.GEOGCS.DATUM.SPHEROID.rf, 10);
+    }
+  }
+  if (wkt.b && !isFinite(wkt.b)) {
+    wkt.b = wkt.a;
+  }
+
+  function toMeter(input) {
+    var ratio = wkt.to_meter || 1;
+    return parseFloat(input, 10) * ratio;
+  }
+  var renamer = function(a) {
+    return rename(wkt, a);
+  };
+  var list = [
+    ['standard_parallel_1', 'Standard_Parallel_1'],
+    ['standard_parallel_2', 'Standard_Parallel_2'],
+    ['false_easting', 'False_Easting'],
+    ['false_northing', 'False_Northing'],
+    ['central_meridian', 'Central_Meridian'],
+    ['latitude_of_origin', 'Latitude_Of_Origin'],
+    ['scale_factor', 'Scale_Factor'],
+    ['k0', 'scale_factor'],
+    ['latitude_of_center', 'Latitude_of_center'],
+    ['lat0', 'latitude_of_center', d2r],
+    ['longitude_of_center', 'Longitude_Of_Center'],
+    ['longc', 'longitude_of_center', d2r],
+    ['x0', 'false_easting', toMeter],
+    ['y0', 'false_northing', toMeter],
+    ['long0', 'central_meridian', d2r],
+    ['lat0', 'latitude_of_origin', d2r],
+    ['lat0', 'standard_parallel_1', d2r],
+    ['lat1', 'standard_parallel_1', d2r],
+    ['lat2', 'standard_parallel_2', d2r],
+    ['alpha', 'azimuth', d2r],
+    ['srsCode', 'name']
+  ];
+  list.forEach(renamer);
+  if (!wkt.long0 && wkt.longc && (wkt.PROJECTION === 'Albers_Conic_Equal_Area' || wkt.PROJECTION === "Lambert_Azimuthal_Equal_Area")) {
+    wkt.long0 = wkt.longc;
+  }
+}
+module.exports = function(wkt, self) {
+  var lisp = JSON.parse(("," + wkt).replace(/\s*\,\s*([A-Z_0-9]+?)(\[)/g, ',["$1",').slice(1).replace(/\s*\,\s*([A-Z_0-9]+?)\]/g, ',"$1"]'));
+  var type = lisp.shift();
+  var name = lisp.shift();
+  lisp.unshift(['name', name]);
+  lisp.unshift(['type', type]);
+  lisp.unshift('output');
+  var obj = {};
+  sExpr(lisp, obj);
+  cleanWKT(obj.output);
+  return extend(self, obj.output);
+};
+
+},{"./extend":76}],110:[function(require,module,exports){
+
 
 
 /**
@@ -5481,8 +8194,8 @@ var Z = 90; // Z
 exports.forward = function(ll, accuracy) {
   accuracy = accuracy || 5; // default accuracy 1m
   return encode(LLtoUTM({
-    lat: ll.lat,
-    lon: ll.lon
+    lat: ll[1],
+    lon: ll[0]
   }), accuracy);
 };
 
@@ -5499,6 +8212,10 @@ exports.inverse = function(mgrs) {
   return [bbox.left, bbox.bottom, bbox.right, bbox.top];
 };
 
+exports.toPoint = function(mgrsStr) {
+  var llbbox = exports.inverse(mgrsStr);
+  return [(llbbox[2] + llbbox[0]) / 2, (llbbox[3] + llbbox[1]) / 2];
+};
 /**
  * Conversion from degrees to radians.
  *
@@ -6168,3779 +8885,1473 @@ function getMinNorthing(zoneLetter) {
 
 }
 
-},{}],18:[function(require,module,exports){
-var common = require('./common');
-var constants = require('./constants');
-module.exports = function(defData) {
-  var self = {};
-
-  var paramObj = {};
-  defData.split("+").map(function(v) {
-    return v.trim();
-  }).filter(function(a) {
-    return a;
-  }).forEach(function(a) {
-    var split = a.split("=");
-    split.push(true);
-    paramObj[split[0].toLowerCase()] = split[1];
-  });
-  var paramName, paramVal, paramOutname;
-  var params = {
-    proj: 'projName',
-    datum: 'datumCode',
-    rf: function(v) {
-      self.rf = parseFloat(v, 10);
+},{}],111:[function(require,module,exports){
+module.exports={
+  "name": "proj4",
+  "version": "2.1.4",
+  "description": "Proj4js is a JavaScript library to transform point coordinates from one coordinate system to another, including datum transformations.",
+  "main": "lib/index.js",
+  "directories": {
+    "test": "test",
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "./node_modules/istanbul/lib/cli.js test ./node_modules/mocha/bin/_mocha test/test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/proj4js/proj4js.git"
+  },
+  "author": "",
+  "license": "MIT",
+  "jam": {
+    "main": "dist/proj4.js",
+    "include": [
+      "dist/proj4.js",
+      "README.md",
+      "AUTHORS",
+      "LICENSE.md"
+    ]
+  },
+  "devDependencies": {
+    "grunt-cli": "~0.1.13",
+    "grunt": "~0.4.2",
+    "grunt-contrib-connect": "~0.6.0",
+    "grunt-contrib-jshint": "~0.8.0",
+    "chai": "~1.8.1",
+    "mocha": "~1.17.1",
+    "grunt-mocha-phantomjs": "~0.4.0",
+    "browserify": "~3.24.5",
+    "grunt-browserify": "~1.3.0",
+    "grunt-contrib-uglify": "~0.3.2",
+    "curl": "git://github.com/cujojs/curl.git",
+    "istanbul": "~0.2.4",
+    "tin": "~0.4.0"
+  },
+  "dependencies": {
+    "mgrs": "0.0.0"
+  },
+  "contributors": [
+    {
+      "name": "Mike Adair",
+      "email": "madair@dmsolutions.ca"
     },
-    lat_0: function(v) {
-      self.lat0 = v * common.D2R;
+    {
+      "name": "Richard Greenwood",
+      "email": "rich@greenwoodmap.com"
     },
-    lat_1: function(v) {
-      self.lat1 = v * common.D2R;
+    {
+      "name": "Calvin Metcalf",
+      "email": "calvin.metcalf@gmail.com"
     },
-    lat_2: function(v) {
-      self.lat2 = v * common.D2R;
+    {
+      "name": "Richard Marsden",
+      "url": "http://www.winwaed.com"
     },
-    lat_ts: function(v) {
-      self.lat_ts = v * common.D2R;
+    {
+      "name": "T. Mittan"
     },
-    lon_0: function(v) {
-      self.long0 = v * common.D2R;
+    {
+      "name": "D. Steinwand"
     },
-    lon_1: function(v) {
-      self.long1 = v * common.D2R;
-    },
-    lon_2: function(v) {
-      self.long2 = v * common.D2R;
-    },
-    alpha: function(v) {
-      self.alpha = parseFloat(v) * common.D2R;
-    },
-    lonc: function(v) {
-      self.longc = v * common.D2R;
-    },
-    x_0: function(v) {
-      self.x0 = parseFloat(v, 10);
-    },
-    y_0: function(v) {
-      self.y0 = parseFloat(v, 10);
-    },
-    k_0: function(v) {
-      self.k0 = parseFloat(v, 10);
-    },
-    k: function(v) {
-      self.k0 = parseFloat(v, 10);
-    },
-    r_a: function() {
-      self.R_A = true;
-    },
-    zone: function(v) {
-      self.zone = parseInt(v, 10);
-    },
-    south: function() {
-      self.utmSouth = true;
-    },
-    towgs84: function(v) {
-      self.datum_params = v.split(",").map(function(a) {
-        return parseFloat(a, 10);
-      });
-    },
-    to_meter: function(v) {
-      self.to_meter = parseFloat(v, 10);
-    },
-    from_greenwich: function(v) {
-      self.from_greenwich = v * common.D2R;
-    },
-    pm: function(v) {
-      self.from_greenwich = (constants.PrimeMeridian[v] ? constants.PrimeMeridian[v] : parseFloat(v, 10)) * common.D2R;
-    },
-    nadgrids: function(v) {
-      if (v === '@null') {
-        self.datumCode = 'none';
-      }
-      else {
-        self.nadgrids = v;
-      }
-    },
-    axis: function(v) {
-      var legalAxis = "ewnsud";
-      if (v.length === 3 && legalAxis.indexOf(v.substr(0, 1)) !== -1 && legalAxis.indexOf(v.substr(1, 1)) !== -1 && legalAxis.indexOf(v.substr(2, 1)) !== -1) {
-        self.axis = v;
-      }
+    {
+      "name": "S. Nelson"
     }
-  };
-  for (paramName in paramObj) {
-    paramVal = paramObj[paramName];
-    if (paramName in params) {
-      paramOutname = params[paramName];
-      if (typeof paramOutname === 'function') {
-        paramOutname(paramVal);
-      }
-      else {
-        self[paramOutname] = paramVal;
-      }
-    }
-    else {
-      self[paramName] = paramVal;
-    }
-  }
-  return self;
-};
-},{"./common":4,"./constants":9}],19:[function(require,module,exports){
-var common = require('../common');
-exports.init = function() {
-
-  if (Math.abs(this.lat1 + this.lat2) < common.EPSLN) {
-    //...reportError("aeaInitEqualLatitudes");
-    return;
-  }
-  this.temp = this.b / this.a;
-  this.es = 1 - Math.pow(this.temp, 2);
-  this.e3 = Math.sqrt(this.es);
-
-  this.sin_po = Math.sin(this.lat1);
-  this.cos_po = Math.cos(this.lat1);
-  this.t1 = this.sin_po;
-  this.con = this.sin_po;
-  this.ms1 = common.msfnz(this.e3, this.sin_po, this.cos_po);
-  this.qs1 = common.qsfnz(this.e3, this.sin_po, this.cos_po);
-
-  this.sin_po = Math.sin(this.lat2);
-  this.cos_po = Math.cos(this.lat2);
-  this.t2 = this.sin_po;
-  this.ms2 = common.msfnz(this.e3, this.sin_po, this.cos_po);
-  this.qs2 = common.qsfnz(this.e3, this.sin_po, this.cos_po);
-
-  this.sin_po = Math.sin(this.lat0);
-  this.cos_po = Math.cos(this.lat0);
-  this.t3 = this.sin_po;
-  this.qs0 = common.qsfnz(this.e3, this.sin_po, this.cos_po);
-
-  if (Math.abs(this.lat1 - this.lat2) > common.EPSLN) {
-    this.ns0 = (this.ms1 * this.ms1 - this.ms2 * this.ms2) / (this.qs2 - this.qs1);
-  }
-  else {
-    this.ns0 = this.con;
-  }
-  this.c = this.ms1 * this.ms1 + this.ns0 * this.qs1;
-  this.rh = this.a * Math.sqrt(this.c - this.ns0 * this.qs0) / this.ns0;
-};
-
-/* Albers Conical Equal Area forward equations--mapping lat,long to x,y
-  -------------------------------------------------------------------*/
-exports.forward = function(p) {
-
-  var lon = p.x;
-  var lat = p.y;
-
-  this.sin_phi = Math.sin(lat);
-  this.cos_phi = Math.cos(lat);
-
-  var qs = common.qsfnz(this.e3, this.sin_phi, this.cos_phi);
-  var rh1 = this.a * Math.sqrt(this.c - this.ns0 * qs) / this.ns0;
-  var theta = this.ns0 * common.adjust_lon(lon - this.long0);
-  var x = rh1 * Math.sin(theta) + this.x0;
-  var y = this.rh - rh1 * Math.cos(theta) + this.y0;
-
-  p.x = x;
-  p.y = y;
-  return p;
-};
-
-
-exports.inverse = function(p) {
-  var rh1, qs, con, theta, lon, lat;
-
-  p.x -= this.x0;
-  p.y = this.rh - p.y + this.y0;
-  if (this.ns0 >= 0) {
-    rh1 = Math.sqrt(p.x * p.x + p.y * p.y);
-    con = 1;
-  }
-  else {
-    rh1 = -Math.sqrt(p.x * p.x + p.y * p.y);
-    con = -1;
-  }
-  theta = 0;
-  if (rh1 !== 0) {
-    theta = Math.atan2(con * p.x, con * p.y);
-  }
-  con = rh1 * this.ns0 / this.a;
-  if (this.sphere) {
-    lat = Math.asin((this.c - con * con) / (2 * this.ns0));
-  }
-  else {
-    qs = (this.c - con * con) / this.ns0;
-    lat = this.phi1z(this.e3, qs);
-  }
-
-  lon = common.adjust_lon(theta / this.ns0 + this.long0);
-  p.x = lon;
-  p.y = lat;
-  return p;
-};
-
-/* Function to compute phi1, the latitude for the inverse of the
-   Albers Conical Equal-Area projection.
--------------------------------------------*/
-exports.phi1z = function(eccent, qs) {
-  var sinphi, cosphi, con, com, dphi;
-  var phi = common.asinz(0.5 * qs);
-  if (eccent < common.EPSLN) {
-    return phi;
-  }
-
-  var eccnts = eccent * eccent;
-  for (var i = 1; i <= 25; i++) {
-    sinphi = Math.sin(phi);
-    cosphi = Math.cos(phi);
-    con = eccent * sinphi;
-    com = 1 - con * con;
-    dphi = 0.5 * com * com / cosphi * (qs / (1 - eccnts) - sinphi / com + 0.5 / eccent * Math.log((1 - con) / (1 + con)));
-    phi = phi + dphi;
-    if (Math.abs(dphi) <= 1e-7) {
-      return phi;
-    }
-  }
-  //...reportError("aea:phi1z:Convergence error");
-  return null;
-};
-exports.names = ["Albers_Conic_Equal_Area", "Albers", "aea"];
-
-},{"../common":4}],20:[function(require,module,exports){
-var common = require('../common');
-exports.init = function() {
-  this.sin_p12 = Math.sin(this.lat0);
-  this.cos_p12 = Math.cos(this.lat0);
-};
-
-exports.forward = function(p) {
-  var lon = p.x;
-  var lat = p.y;
-  var sinphi = Math.sin(p.y);
-  var cosphi = Math.cos(p.y);
-  var dlon = common.adjust_lon(lon - this.long0);
-  var e0, e1, e2, e3, Mlp, Ml, tanphi, Nl1, Nl, psi, Az, G, H, GH, Hs, c, kp, cos_c, s, s2, s3, s4, s5;
-  if (this.sphere) {
-    if (Math.abs(this.sin_p12 - 1) <= common.EPSLN) {
-      //North Pole case
-      p.x = this.x0 + this.a * (common.HALF_PI - lat) * Math.sin(dlon);
-      p.y = this.y0 - this.a * (common.HALF_PI - lat) * Math.cos(dlon);
-      return p;
-    }
-    else if (Math.abs(this.sin_p12 + 1) <= common.EPSLN) {
-      //South Pole case
-      p.x = this.x0 + this.a * (common.HALF_PI + lat) * Math.sin(dlon);
-      p.y = this.y0 + this.a * (common.HALF_PI + lat) * Math.cos(dlon);
-      return p;
-    }
-    else {
-      //default case
-      cos_c = this.sin_p12 * sinphi + this.cos_p12 * cosphi * Math.cos(dlon);
-      c = Math.acos(cos_c);
-      kp = c / Math.sin(c);
-      p.x = this.x0 + this.a * kp * cosphi * Math.sin(dlon);
-      p.y = this.y0 + this.a * kp * (this.cos_p12 * sinphi - this.sin_p12 * cosphi * Math.cos(dlon));
-      return p;
-    }
-  }
-  else {
-    e0 = common.e0fn(this.es);
-    e1 = common.e1fn(this.es);
-    e2 = common.e2fn(this.es);
-    e3 = common.e3fn(this.es);
-    if (Math.abs(this.sin_p12 - 1) <= common.EPSLN) {
-      //North Pole case
-      Mlp = this.a * common.mlfn(e0, e1, e2, e3, common.HALF_PI);
-      Ml = this.a * common.mlfn(e0, e1, e2, e3, lat);
-      p.x = this.x0 + (Mlp - Ml) * Math.sin(dlon);
-      p.y = this.y0 - (Mlp - Ml) * Math.cos(dlon);
-      return p;
-    }
-    else if (Math.abs(this.sin_p12 + 1) <= common.EPSLN) {
-      //South Pole case
-      Mlp = this.a * common.mlfn(e0, e1, e2, e3, common.HALF_PI);
-      Ml = this.a * common.mlfn(e0, e1, e2, e3, lat);
-      p.x = this.x0 + (Mlp + Ml) * Math.sin(dlon);
-      p.y = this.y0 + (Mlp + Ml) * Math.cos(dlon);
-      return p;
-    }
-    else {
-      //Default case
-      tanphi = sinphi / cosphi;
-      Nl1 = common.gN(this.a, this.e, this.sin_p12);
-      Nl = common.gN(this.a, this.e, sinphi);
-      psi = Math.atan((1 - this.es) * tanphi + this.es * Nl1 * this.sin_p12 / (Nl * cosphi));
-      Az = Math.atan2(Math.sin(dlon), this.cos_p12 * Math.tan(psi) - this.sin_p12 * Math.cos(dlon));
-      if (Az === 0) {
-        s = Math.asin(this.cos_p12 * Math.sin(psi) - this.sin_p12 * Math.cos(psi));
-      }
-      else if (Math.abs(Math.abs(Az) - common.PI) <= common.EPSLN) {
-        s = -Math.asin(this.cos_p12 * Math.sin(psi) - this.sin_p12 * Math.cos(psi));
-      }
-      else {
-        s = Math.asin(Math.sin(dlon) * Math.cos(psi) / Math.sin(Az));
-      }
-      G = this.e * this.sin_p12 / Math.sqrt(1 - this.es);
-      H = this.e * this.cos_p12 * Math.cos(Az) / Math.sqrt(1 - this.es);
-      GH = G * H;
-      Hs = H * H;
-      s2 = s * s;
-      s3 = s2 * s;
-      s4 = s3 * s;
-      s5 = s4 * s;
-      c = Nl1 * s * (1 - s2 * Hs * (1 - Hs) / 6 + s3 / 8 * GH * (1 - 2 * Hs) + s4 / 120 * (Hs * (4 - 7 * Hs) - 3 * G * G * (1 - 7 * Hs)) - s5 / 48 * GH);
-      p.x = this.x0 + c * Math.sin(Az);
-      p.y = this.y0 + c * Math.cos(Az);
-      return p;
-    }
-  }
-
-
-};
-
-exports.inverse = function(p) {
-  p.x -= this.x0;
-  p.y -= this.y0;
-  var rh, z, sinz, cosz, lon, lat, con, e0, e1, e2, e3, Mlp, M, N1, psi, Az, cosAz, tmp, A, B, D, Ee, F;
-  if (this.sphere) {
-    rh = Math.sqrt(p.x * p.x + p.y * p.y);
-    if (rh > (2 * common.HALF_PI * this.a)) {
-      //...reportError("aeqdInvDataError");
-      return;
-    }
-    z = rh / this.a;
-
-    sinz = Math.sin(z);
-    cosz = Math.cos(z);
-
-    lon = this.long0;
-    if (Math.abs(rh) <= common.EPSLN) {
-      lat = this.lat0;
-    }
-    else {
-      lat = common.asinz(cosz * this.sin_p12 + (p.y * sinz * this.cos_p12) / rh);
-      con = Math.abs(this.lat0) - common.HALF_PI;
-      if (Math.abs(con) <= common.EPSLN) {
-        if (this.lat0 >= 0) {
-          lon = common.adjust_lon(this.long0 + Math.atan2(p.x, - p.y));
-        }
-        else {
-          lon = common.adjust_lon(this.long0 - Math.atan2(-p.x, p.y));
-        }
-      }
-      else {
-        /*con = cosz - this.sin_p12 * Math.sin(lat);
-        if ((Math.abs(con) < common.EPSLN) && (Math.abs(p.x) < common.EPSLN)) {
-          //no-op, just keep the lon value as is
-        } else {
-          var temp = Math.atan2((p.x * sinz * this.cos_p12), (con * rh));
-          lon = common.adjust_lon(this.long0 + Math.atan2((p.x * sinz * this.cos_p12), (con * rh)));
-        }*/
-        lon = common.adjust_lon(this.long0 + Math.atan2(p.x * sinz, rh * this.cos_p12 * cosz - p.y * this.sin_p12 * sinz));
-      }
-    }
-
-    p.x = lon;
-    p.y = lat;
-    return p;
-  }
-  else {
-    e0 = common.e0fn(this.es);
-    e1 = common.e1fn(this.es);
-    e2 = common.e2fn(this.es);
-    e3 = common.e3fn(this.es);
-    if (Math.abs(this.sin_p12 - 1) <= common.EPSLN) {
-      //North pole case
-      Mlp = this.a * common.mlfn(e0, e1, e2, e3, common.HALF_PI);
-      rh = Math.sqrt(p.x * p.x + p.y * p.y);
-      M = Mlp - rh;
-      lat = common.imlfn(M / this.a, e0, e1, e2, e3);
-      lon = common.adjust_lon(this.long0 + Math.atan2(p.x, - 1 * p.y));
-      p.x = lon;
-      p.y = lat;
-      return p;
-    }
-    else if (Math.abs(this.sin_p12 + 1) <= common.EPSLN) {
-      //South pole case
-      Mlp = this.a * common.mlfn(e0, e1, e2, e3, common.HALF_PI);
-      rh = Math.sqrt(p.x * p.x + p.y * p.y);
-      M = rh - Mlp;
-
-      lat = common.imlfn(M / this.a, e0, e1, e2, e3);
-      lon = common.adjust_lon(this.long0 + Math.atan2(p.x, p.y));
-      p.x = lon;
-      p.y = lat;
-      return p;
-    }
-    else {
-      //default case
-      rh = Math.sqrt(p.x * p.x + p.y * p.y);
-      Az = Math.atan2(p.x, p.y);
-      N1 = common.gN(this.a, this.e, this.sin_p12);
-      cosAz = Math.cos(Az);
-      tmp = this.e * this.cos_p12 * cosAz;
-      A = -tmp * tmp / (1 - this.es);
-      B = 3 * this.es * (1 - A) * this.sin_p12 * this.cos_p12 * cosAz / (1 - this.es);
-      D = rh / N1;
-      Ee = D - A * (1 + A) * Math.pow(D, 3) / 6 - B * (1 + 3 * A) * Math.pow(D, 4) / 24;
-      F = 1 - A * Ee * Ee / 2 - D * Ee * Ee * Ee / 6;
-      psi = Math.asin(this.sin_p12 * Math.cos(Ee) + this.cos_p12 * Math.sin(Ee) * cosAz);
-      lon = common.adjust_lon(this.long0 + Math.asin(Math.sin(Az) * Math.sin(Ee) / Math.cos(psi)));
-      lat = Math.atan((1 - this.es * F * this.sin_p12 / Math.sin(psi)) * Math.tan(psi) / (1 - this.es));
-      p.x = lon;
-      p.y = lat;
-      return p;
-    }
-  }
-
-};
-exports.names = ["Azimuthal_Equidistant", "aeqd"];
-
-},{"../common":4}],21:[function(require,module,exports){
-var common = require('../common');
-exports.init = function() {
-  if (!this.sphere) {
-    this.e0 = common.e0fn(this.es);
-    this.e1 = common.e1fn(this.es);
-    this.e2 = common.e2fn(this.es);
-    this.e3 = common.e3fn(this.es);
-    this.ml0 = this.a * common.mlfn(this.e0, this.e1, this.e2, this.e3, this.lat0);
-  }
-};
-
-
-
-/* Cassini forward equations--mapping lat,long to x,y
-  -----------------------------------------------------------------------*/
-exports.forward = function(p) {
-
-  /* Forward equations
-      -----------------*/
-  var x, y;
-  var lam = p.x;
-  var phi = p.y;
-  lam = common.adjust_lon(lam - this.long0);
-
-  if (this.sphere) {
-    x = this.a * Math.asin(Math.cos(phi) * Math.sin(lam));
-    y = this.a * (Math.atan2(Math.tan(phi), Math.cos(lam)) - this.lat0);
-  }
-  else {
-    //ellipsoid
-    var sinphi = Math.sin(phi);
-    var cosphi = Math.cos(phi);
-    var nl = common.gN(this.a, this.e, sinphi);
-    var tl = Math.tan(phi) * Math.tan(phi);
-    var al = lam * Math.cos(phi);
-    var asq = al * al;
-    var cl = this.es * cosphi * cosphi / (1 - this.es);
-    var ml = this.a * common.mlfn(this.e0, this.e1, this.e2, this.e3, phi);
-
-    x = nl * al * (1 - asq * tl * (1 / 6 - (8 - tl + 8 * cl) * asq / 120));
-    y = ml - this.ml0 + nl * sinphi / cosphi * asq * (0.5 + (5 - tl + 6 * cl) * asq / 24);
-
-
-  }
-
-  p.x = x + this.x0;
-  p.y = y + this.y0;
-  return p;
-};
-
-/* Inverse equations
-  -----------------*/
-exports.inverse = function(p) {
-  p.x -= this.x0;
-  p.y -= this.y0;
-  var x = p.x / this.a;
-  var y = p.y / this.a;
-  var phi, lam;
-
-  if (this.sphere) {
-    var dd = y + this.lat0;
-    phi = Math.asin(Math.sin(dd) * Math.cos(x));
-    lam = Math.atan2(Math.tan(x), Math.cos(dd));
-  }
-  else {
-    /* ellipsoid */
-    var ml1 = this.ml0 / this.a + y;
-    var phi1 = common.imlfn(ml1, this.e0, this.e1, this.e2, this.e3);
-    if (Math.abs(Math.abs(phi1) - common.HALF_PI) <= common.EPSLN) {
-      p.x = this.long0;
-      p.y = common.HALF_PI;
-      if (y < 0) {
-        p.y *= -1;
-      }
-      return p;
-    }
-    var nl1 = common.gN(this.a, this.e, Math.sin(phi1));
-
-    var rl1 = nl1 * nl1 * nl1 / this.a / this.a * (1 - this.es);
-    var tl1 = Math.pow(Math.tan(phi1), 2);
-    var dl = x * this.a / nl1;
-    var dsq = dl * dl;
-    phi = phi1 - nl1 * Math.tan(phi1) / rl1 * dl * dl * (0.5 - (1 + 3 * tl1) * dl * dl / 24);
-    lam = dl * (1 - dsq * (tl1 / 3 + (1 + 3 * tl1) * tl1 * dsq / 15)) / Math.cos(phi1);
-
-  }
-
-  p.x = common.adjust_lon(lam + this.long0);
-  p.y = common.adjust_lat(phi);
-  return p;
-
-};
-exports.names = ["Cassini", "Cassini_Soldner", "cass"];
-},{"../common":4}],22:[function(require,module,exports){
-var common = require('../common');
-/*
-  reference:  
-    "Cartographic Projection Procedures for the UNIX Environment-
-    A User's Manual" by Gerald I. Evenden,
-    USGS Open File Report 90-284and Release 4 Interim Reports (2003)
-*/
-exports.init = function() {
-  //no-op
-  if (!this.sphere) {
-    this.k0 = common.msfnz(this.e, Math.sin(this.lat_ts), Math.cos(this.lat_ts));
-  }
-};
-
-
-/* Cylindrical Equal Area forward equations--mapping lat,long to x,y
-    ------------------------------------------------------------*/
-exports.forward = function(p) {
-  var lon = p.x;
-  var lat = p.y;
-  var x, y;
-  /* Forward equations
-      -----------------*/
-  var dlon = common.adjust_lon(lon - this.long0);
-  if (this.sphere) {
-    x = this.x0 + this.a * dlon * Math.cos(this.lat_ts);
-    y = this.y0 + this.a * Math.sin(lat) / Math.cos(this.lat_ts);
-  }
-  else {
-    var qs = common.qsfnz(this.e, Math.sin(lat));
-    x = this.x0 + this.a * this.k0 * dlon;
-    y = this.y0 + this.a * qs * 0.5 / this.k0;
-  }
-
-  p.x = x;
-  p.y = y;
-  return p;
-};
-
-/* Cylindrical Equal Area inverse equations--mapping x,y to lat/long
-    ------------------------------------------------------------*/
-exports.inverse = function(p) {
-  p.x -= this.x0;
-  p.y -= this.y0;
-  var lon, lat;
-
-  if (this.sphere) {
-    lon = common.adjust_lon(this.long0 + (p.x / this.a) / Math.cos(this.lat_ts));
-    lat = Math.asin((p.y / this.a) * Math.cos(this.lat_ts));
-  }
-  else {
-    lat = common.iqsfnz(this.e, 2 * p.y * this.k0 / this.a);
-    lon = common.adjust_lon(this.long0 + p.x / (this.a * this.k0));
-  }
-
-  p.x = lon;
-  p.y = lat;
-  return p;
-};
-exports.names = ["cea"];
-
-},{"../common":4}],23:[function(require,module,exports){
-var common = require('../common');
-exports.init = function() {
-
-  this.x0 = this.x0 || 0;
-  this.y0 = this.y0 || 0;
-  this.lat0 = this.lat0 || 0;
-  this.long0 = this.long0 || 0;
-  this.lat_ts = this.lat_t || 0;
-  this.title = this.title || "Equidistant Cylindrical (Plate Carre)";
-
-  this.rc = Math.cos(this.lat_ts);
-};
-
-
-// forward equations--mapping lat,long to x,y
-// -----------------------------------------------------------------
-exports.forward = function(p) {
-
-  var lon = p.x;
-  var lat = p.y;
-
-  var dlon = common.adjust_lon(lon - this.long0);
-  var dlat = common.adjust_lat(lat - this.lat0);
-  p.x = this.x0 + (this.a * dlon * this.rc);
-  p.y = this.y0 + (this.a * dlat);
-  return p;
-};
-
-// inverse equations--mapping x,y to lat/long
-// -----------------------------------------------------------------
-exports.inverse = function(p) {
-
-  var x = p.x;
-  var y = p.y;
-
-  p.x = common.adjust_lon(this.long0 + ((x - this.x0) / (this.a * this.rc)));
-  p.y = common.adjust_lat(this.lat0 + ((y - this.y0) / (this.a)));
-  return p;
-};
-exports.names = ["Equirectangular", "Equidistant_Cylindrical", "eqc"];
-
-},{"../common":4}],24:[function(require,module,exports){
-var common = require('../common');
-exports.init = function() {
-
-  /* Place parameters in static storage for common use
-      -------------------------------------------------*/
-  // Standard Parallels cannot be equal and on opposite sides of the equator
-  if (Math.abs(this.lat1 + this.lat2) < common.EPSLN) {
-    common.reportError("eqdc:init: Equal Latitudes");
-    return;
-  }
-  this.lat2 = this.lat2 || this.lat1;
-  this.temp = this.b / this.a;
-  this.es = 1 - Math.pow(this.temp, 2);
-  this.e = Math.sqrt(this.es);
-  this.e0 = common.e0fn(this.es);
-  this.e1 = common.e1fn(this.es);
-  this.e2 = common.e2fn(this.es);
-  this.e3 = common.e3fn(this.es);
-
-  this.sinphi = Math.sin(this.lat1);
-  this.cosphi = Math.cos(this.lat1);
-
-  this.ms1 = common.msfnz(this.e, this.sinphi, this.cosphi);
-  this.ml1 = common.mlfn(this.e0, this.e1, this.e2, this.e3, this.lat1);
-
-  if (Math.abs(this.lat1 - this.lat2) < common.EPSLN) {
-    this.ns = this.sinphi;
-    //...reportError("eqdc:Init:EqualLatitudes");
-  }
-  else {
-    this.sinphi = Math.sin(this.lat2);
-    this.cosphi = Math.cos(this.lat2);
-    this.ms2 = common.msfnz(this.e, this.sinphi, this.cosphi);
-    this.ml2 = common.mlfn(this.e0, this.e1, this.e2, this.e3, this.lat2);
-    this.ns = (this.ms1 - this.ms2) / (this.ml2 - this.ml1);
-  }
-  this.g = this.ml1 + this.ms1 / this.ns;
-  this.ml0 = common.mlfn(this.e0, this.e1, this.e2, this.e3, this.lat0);
-  this.rh = this.a * (this.g - this.ml0);
-};
-
-
-/* Equidistant Conic forward equations--mapping lat,long to x,y
-  -----------------------------------------------------------*/
-exports.forward = function(p) {
-  var lon = p.x;
-  var lat = p.y;
-  var rh1;
-
-  /* Forward equations
-      -----------------*/
-  if (this.sphere) {
-    rh1 = this.a * (this.g - lat);
-  }
-  else {
-    var ml = common.mlfn(this.e0, this.e1, this.e2, this.e3, lat);
-    rh1 = this.a * (this.g - ml);
-  }
-  var theta = this.ns * common.adjust_lon(lon - this.long0);
-  var x = this.x0 + rh1 * Math.sin(theta);
-  var y = this.y0 + this.rh - rh1 * Math.cos(theta);
-  p.x = x;
-  p.y = y;
-  return p;
-};
-
-/* Inverse equations
-  -----------------*/
-exports.inverse = function(p) {
-  p.x -= this.x0;
-  p.y = this.rh - p.y + this.y0;
-  var con, rh1, lat, lon;
-  if (this.ns >= 0) {
-    rh1 = Math.sqrt(p.x * p.x + p.y * p.y);
-    con = 1;
-  }
-  else {
-    rh1 = -Math.sqrt(p.x * p.x + p.y * p.y);
-    con = -1;
-  }
-  var theta = 0;
-  if (rh1 !== 0) {
-    theta = Math.atan2(con * p.x, con * p.y);
-  }
-
-  if (this.sphere) {
-    lon = common.adjust_lon(this.long0 + theta / this.ns);
-    lat = common.adjust_lat(this.g - rh1 / this.a);
-    p.x = lon;
-    p.y = lat;
-    return p;
-  }
-  else {
-    var ml = this.g - rh1 / this.a;
-    lat = common.imlfn(ml, this.e0, this.e1, this.e2, this.e3);
-    lon = common.adjust_lon(this.long0 + theta / this.ns);
-    p.x = lon;
-    p.y = lat;
-    return p;
-  }
-
-};
-exports.names = ["Equidistant_Conic", "eqdc"];
-
-},{"../common":4}],25:[function(require,module,exports){
-var common = require('../common');
-exports.init = function() {
-  var sphi = Math.sin(this.lat0);
-  var cphi = Math.cos(this.lat0);
-  cphi *= cphi;
-  this.rc = Math.sqrt(1 - this.es) / (1 - this.es * sphi * sphi);
-  this.C = Math.sqrt(1 + this.es * cphi * cphi / (1 - this.es));
-  this.phic0 = Math.asin(sphi / this.C);
-  this.ratexp = 0.5 * this.C * this.e;
-  this.K = Math.tan(0.5 * this.phic0 + common.FORTPI) / (Math.pow(Math.tan(0.5 * this.lat0 + common.FORTPI), this.C) * common.srat(this.e * sphi, this.ratexp));
-};
-
-exports.forward = function(p) {
-  var lon = p.x;
-  var lat = p.y;
-
-  p.y = 2 * Math.atan(this.K * Math.pow(Math.tan(0.5 * lat + common.FORTPI), this.C) * common.srat(this.e * Math.sin(lat), this.ratexp)) - common.HALF_PI;
-  p.x = this.C * lon;
-  return p;
-};
-
-exports.inverse = function(p) {
-  var DEL_TOL = 1e-14;
-  var lon = p.x / this.C;
-  var lat = p.y;
-  var num = Math.pow(Math.tan(0.5 * lat + common.FORTPI) / this.K, 1 / this.C);
-  for (var i = common.MAX_ITER; i > 0; --i) {
-    lat = 2 * Math.atan(num * common.srat(this.e * Math.sin(p.y), - 0.5 * this.e)) - common.HALF_PI;
-    if (Math.abs(lat - p.y) < DEL_TOL) {
-      break;
-    }
-    p.y = lat;
-  }
-  /* convergence failed */
-  if (!i) {
-    //...reportError("gauss:inverse:convergence failed");
-    return null;
-  }
-  p.x = lon;
-  p.y = lat;
-  return p;
-};
-exports.names = ["gauss"];
-},{"../common":4}],26:[function(require,module,exports){
-var common = require('../common');
-/*
-  reference:
-    Wolfram Mathworld "Gnomonic Projection"
-    http://mathworld.wolfram.com/GnomonicProjection.html
-    Accessed: 12th November 2009
-  */
-exports.init = function() {
-
-  /* Place parameters in static storage for common use
-      -------------------------------------------------*/
-  this.sin_p14 = Math.sin(this.lat0);
-  this.cos_p14 = Math.cos(this.lat0);
-  // Approximation for projecting points to the horizon (infinity)
-  this.infinity_dist = 1000 * this.a;
-  this.rc = 1;
-};
-
-
-/* Gnomonic forward equations--mapping lat,long to x,y
-    ---------------------------------------------------*/
-exports.forward = function(p) {
-  var sinphi, cosphi; /* sin and cos value        */
-  var dlon; /* delta longitude value      */
-  var coslon; /* cos of longitude        */
-  var ksp; /* scale factor          */
-  var g;
-  var x, y;
-  var lon = p.x;
-  var lat = p.y;
-  /* Forward equations
-      -----------------*/
-  dlon = common.adjust_lon(lon - this.long0);
-
-  sinphi = Math.sin(lat);
-  cosphi = Math.cos(lat);
-
-  coslon = Math.cos(dlon);
-  g = this.sin_p14 * sinphi + this.cos_p14 * cosphi * coslon;
-  ksp = 1;
-  if ((g > 0) || (Math.abs(g) <= common.EPSLN)) {
-    x = this.x0 + this.a * ksp * cosphi * Math.sin(dlon) / g;
-    y = this.y0 + this.a * ksp * (this.cos_p14 * sinphi - this.sin_p14 * cosphi * coslon) / g;
-  }
-  else {
-    //...reportError("orthoFwdPointError");
-
-    // Point is in the opposing hemisphere and is unprojectable
-    // We still need to return a reasonable point, so we project 
-    // to infinity, on a bearing 
-    // equivalent to the northern hemisphere equivalent
-    // This is a reasonable approximation for short shapes and lines that 
-    // straddle the horizon.
-
-    x = this.x0 + this.infinity_dist * cosphi * Math.sin(dlon);
-    y = this.y0 + this.infinity_dist * (this.cos_p14 * sinphi - this.sin_p14 * cosphi * coslon);
-
-  }
-  p.x = x;
-  p.y = y;
-  return p;
-};
-
-
-exports.inverse = function(p) {
-  var rh; /* Rho */
-  var sinc, cosc;
-  var c;
-  var lon, lat;
-
-  /* Inverse equations
-      -----------------*/
-  p.x = (p.x - this.x0) / this.a;
-  p.y = (p.y - this.y0) / this.a;
-
-  p.x /= this.k0;
-  p.y /= this.k0;
-
-  if ((rh = Math.sqrt(p.x * p.x + p.y * p.y))) {
-    c = Math.atan2(rh, this.rc);
-    sinc = Math.sin(c);
-    cosc = Math.cos(c);
-
-    lat = common.asinz(cosc * this.sin_p14 + (p.y * sinc * this.cos_p14) / rh);
-    lon = Math.atan2(p.x * sinc, rh * this.cos_p14 * cosc - p.y * this.sin_p14 * sinc);
-    lon = common.adjust_lon(this.long0 + lon);
-  }
-  else {
-    lat = this.phic0;
-    lon = 0;
-  }
-
-  p.x = lon;
-  p.y = lat;
-  return p;
-};
-exports.names = ["gnom"];
-
-},{"../common":4}],27:[function(require,module,exports){
-var projs = [
-  require('./tmerc'),
-  require('./utm'),
-  require('./sterea'),
-  require('./stere'),
-  require('./somerc'),
-  require('./omerc'),
-  require('./lcc'),
-  require('./krovak'),
-  require('./cass'),
-  require('./laea'),
-  require('./merc'),
-  require('./aea'),
-  require('./gnom'),
-  require('./cea'),
-  require('./eqc'),
-  require('./poly'),
-  require('./nzmg'),
-  require('./mill'),
-  require('./sinu'),
-  require('./moll'),
-  require('./eqdc'),
-  require('./vandg'),
-  require('./aeqd'),
-  require('./longlat')
-];
-var names = {};
-var projStore = [];
-
-function add(proj, i) {
-  var len = projStore.length;
-  if (!proj.names) {
-    console.log(i);
-    return true;
-  }
-  projStore[len] = proj;
-  proj.names.forEach(function(n) {
-    names[n.toLowerCase()] = len;
-  });
-  return this;
+  ],
+  "readme": "#PROJ4JS\n\nProj4js is a JavaScript library to transform point coordinates from one coordinate system to another, including datum transformations.\nOriginally a port of [PROJ.4](http://trac.osgeo.org/proj/) and [GCTCP C](http://edcftp.cr.usgs.gov/pub//software/gctpc) it is\na part of the [MetaCRS](http://wiki.osgeo.org/wiki/MetaCRS) group of projects.\n\n##Installing\n\nDepending on your preferences\n\n```bash\nnpm install proj4\nbower install proj4\njam install proj4\ncomponent install proj4js/proj4js\n```\n\nor just manually grab the file `dist/proj4.js`\n\n##Using\n\nthe basic signature is:\n\n```javascript\nproj4(fromProjection[, toProjection2, coordinates])\n```\n\nProjections can be proj or wkt strings, or a proj4.Proj object.\n\nCoordinates may be proj4.Point objects, an object of the form `{x:x,y:y}`, or an array of the form `[x,y]`.\n\nWhen all 3 arguments  are given, the result is that the coordinates are transformed from projection1 to projection 2. And returned in the same format that they were given in.\n\n```javascript\nvar firstProjection = 'PROJCS[\"NAD83 / Massachusetts Mainland\",GEOGCS[\"NAD83\",DATUM[\"North_American_Datum_1983\",SPHEROID[\"GRS 1980\",6378137,298.257222101,AUTHORITY[\"EPSG\",\"7019\"]],AUTHORITY[\"EPSG\",\"6269\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.01745329251994328,AUTHORITY[\"EPSG\",\"9122\"]],AUTHORITY[\"EPSG\",\"4269\"]],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],PROJECTION[\"Lambert_Conformal_Conic_2SP\"],PARAMETER[\"standard_parallel_1\",42.68333333333333],PARAMETER[\"standard_parallel_2\",41.71666666666667],PARAMETER[\"latitude_of_origin\",41],PARAMETER[\"central_meridian\",-71.5],PARAMETER[\"false_easting\",200000],PARAMETER[\"false_northing\",750000],AUTHORITY[\"EPSG\",\"26986\"],AXIS[\"X\",EAST],AXIS[\"Y\",NORTH]]';\nvar secondProjection = \"+proj=gnom +lat_0=90 +lon_0=0 +x_0=6300000 +y_0=6300000 +ellps=WGS84 +datum=WGS84 +units=m +no_defs\";\n//I'm not going to redefine those two in latter examples.\nproj4(firstProjection,secondProjection,[2,5]);\n// [-2690666.2977344505, 3662659.885459918]\n```\n\nIf only 1 projection is given then it is assumed that it is being projected *from* WGS84 (fromProjection is WGS84).\n\n```javascript\nproj4(firstProjection,[-71,41]);\n// [242075.00535055372, 750123.32090043]\n```\n\nIf no coordinates are given an object with two methods is returned, its methods are `forward` which projects from the first projection to the second and `inverse` which projects from the second to the first.\n\n```javascript\nproj4(firstProjection,secondProjection).forward([2,5]);\n// [-2690666.2977344505, 3662659.885459918]\nproj4(secondProjection,firstProjection).inverse([2,5]);\n// [-2690666.2977344505, 3662659.885459918]\n```\n\nand as above if only one projection is given, it's assumed to be coming from wgs84\n\n```javascript\nproj4(firstProjection).forward([-71,41]);\n// [242075.00535055372, 750123.32090043]\nproj4(firstProjection).inverse([242075.00535055372, 750123.32090043]);\n//[-71, 40.99999999999986]\n//the floating points to answer your question\n```\n\n\n##Developing\nto set up build tools make sure you have node and grunt-cli installed and then run `npm install`\n\nto do the complete build and browser tests run\n\n```bash\ngrunt\n```\n\nto run node tests run\n\n```bash\nnpm test\n```\n\nto run node tests with coverage run\n\n```bash\nnode test --coverage\n```\n\nto create a build with only default projections (latlon and Mercator) run \n\n```bash\ngrunt build\n```\n\nto create a build with only custom projections include a comma separated list of projections codes (the file name in 'lib/projections' without the '.js') after a colon, e.g.\n\n```bash\ngrunt build:tmerc\n#includes transverse Mercator\ngrunt build:lcc\n#includes lambert conformal conic\ngrunt build:omerc,moll\n#includes oblique Mercator and Mollweide\n```\n",
+  "readmeFilename": "README.md",
+  "bugs": {
+    "url": "https://github.com/proj4js/proj4js/issues"
+  },
+  "homepage": "https://github.com/proj4js/proj4js",
+  "_id": "proj4@2.1.4",
+  "_from": "proj4@~2.1.0"
 }
 
-exports.add = add;
-
-exports.get = function(name) {
-  if (!name) {
-    return false;
-  }
-  var n = name.toLowerCase();
-  if (typeof names[n] !== 'undefined' && projStore[names[n]]) {
-    return projStore[names[n]];
-  }
-};
-exports.start = function() {
-  projs.forEach(add);
-};
-
-},{"./aea":19,"./aeqd":20,"./cass":21,"./cea":22,"./eqc":23,"./eqdc":24,"./gnom":26,"./krovak":28,"./laea":29,"./lcc":30,"./longlat":31,"./merc":32,"./mill":33,"./moll":34,"./nzmg":35,"./omerc":36,"./poly":37,"./sinu":38,"./somerc":39,"./stere":40,"./sterea":41,"./tmerc":42,"./utm":43,"./vandg":44}],28:[function(require,module,exports){
-var common = require('../common');
-exports.init = function() {
-  /* we want Bessel as fixed ellipsoid */
-  this.a = 6377397.155;
-  this.es = 0.006674372230614;
-  this.e = Math.sqrt(this.es);
-  /* if latitude of projection center is not set, use 49d30'N */
-  if (!this.lat0) {
-    this.lat0 = 0.863937979737193;
-  }
-  if (!this.long0) {
-    this.long0 = 0.7417649320975901 - 0.308341501185665;
-  }
-  /* if scale not set default to 0.9999 */
-  if (!this.k0) {
-    this.k0 = 0.9999;
-  }
-  this.s45 = 0.785398163397448; /* 45 */
-  this.s90 = 2 * this.s45;
-  this.fi0 = this.lat0; /* Latitude of projection centre 49  30' */
-  /*  Ellipsoid Bessel 1841 a = 6377397.155m 1/f = 299.1528128,
-                 e2=0.006674372230614;
-     */
-  this.e2 = this.es; /* 0.006674372230614; */
-  this.e = Math.sqrt(this.e2);
-  this.alfa = Math.sqrt(1 + (this.e2 * Math.pow(Math.cos(this.fi0), 4)) / (1 - this.e2));
-  this.uq = 1.04216856380474; /* DU(2, 59, 42, 42.69689) */
-  this.u0 = Math.asin(Math.sin(this.fi0) / this.alfa);
-  this.g = Math.pow((1 + this.e * Math.sin(this.fi0)) / (1 - this.e * Math.sin(this.fi0)), this.alfa * this.e / 2);
-  this.k = Math.tan(this.u0 / 2 + this.s45) / Math.pow(Math.tan(this.fi0 / 2 + this.s45), this.alfa) * this.g;
-  this.k1 = this.k0;
-  this.n0 = this.a * Math.sqrt(1 - this.e2) / (1 - this.e2 * Math.pow(Math.sin(this.fi0), 2));
-  this.s0 = 1.37008346281555; /* Latitude of pseudo standard parallel 78 30'00" N */
-  this.n = Math.sin(this.s0);
-  this.ro0 = this.k1 * this.n0 / Math.tan(this.s0);
-  this.ad = this.s90 - this.uq;
-};
-
-/* ellipsoid */
-/* calculate xy from lat/lon */
-/* Constants, identical to inverse transform function */
-exports.forward = function(p) {
-  var gfi, u, deltav, s, d, eps, ro;
-  var lon = p.x;
-  var lat = p.y;
-  var delta_lon = common.adjust_lon(lon - this.long0); // Delta longitude
-  /* Transformation */
-  gfi = Math.pow(((1 + this.e * Math.sin(lat)) / (1 - this.e * Math.sin(lat))), (this.alfa * this.e / 2));
-  u = 2 * (Math.atan(this.k * Math.pow(Math.tan(lat / 2 + this.s45), this.alfa) / gfi) - this.s45);
-  deltav = -delta_lon * this.alfa;
-  s = Math.asin(Math.cos(this.ad) * Math.sin(u) + Math.sin(this.ad) * Math.cos(u) * Math.cos(deltav));
-  d = Math.asin(Math.cos(u) * Math.sin(deltav) / Math.cos(s));
-  eps = this.n * d;
-  ro = this.ro0 * Math.pow(Math.tan(this.s0 / 2 + this.s45), this.n) / Math.pow(Math.tan(s / 2 + this.s45), this.n);
-  /* x and y are reverted! */
-  //p.y = ro * Math.cos(eps) / a;
-  //p.x = ro * Math.sin(eps) / a;
-  p.y = ro * Math.cos(eps) / 1;
-  p.x = ro * Math.sin(eps) / 1;
-
-  if (!this.czech) {
-    p.y *= -1;
-    p.x *= -1;
-  }
-  return (p);
-};
-
-/* calculate lat/lon from xy */
-exports.inverse = function(p) {
-  /* Constants, identisch wie in der Umkehrfunktion */
-  var u, deltav, s, d, eps, ro, fi1;
-  var ok;
-
-  /* Transformation */
-  /* revert y, x*/
-  var tmp = p.x;
-  p.x = p.y;
-  p.y = tmp;
-  if (!this.czech) {
-    p.y *= -1;
-    p.x *= -1;
-  }
-  ro = Math.sqrt(p.x * p.x + p.y * p.y);
-  eps = Math.atan2(p.y, p.x);
-  d = eps / Math.sin(this.s0);
-  s = 2 * (Math.atan(Math.pow(this.ro0 / ro, 1 / this.n) * Math.tan(this.s0 / 2 + this.s45)) - this.s45);
-  u = Math.asin(Math.cos(this.ad) * Math.sin(s) - Math.sin(this.ad) * Math.cos(s) * Math.cos(d));
-  deltav = Math.asin(Math.cos(s) * Math.sin(d) / Math.cos(u));
-  p.x = this.long0 - deltav / this.alfa;
-  /* ITERATION FOR lat */
-  fi1 = u;
-  ok = 0;
-  var iter = 0;
-  do {
-    p.y = 2 * (Math.atan(Math.pow(this.k, - 1 / this.alfa) * Math.pow(Math.tan(u / 2 + this.s45), 1 / this.alfa) * Math.pow((1 + this.e * Math.sin(fi1)) / (1 - this.e * Math.sin(fi1)), this.e / 2)) - this.s45);
-    if (Math.abs(fi1 - p.y) < 0.0000000001) {
-      ok = 1;
-    }
-    fi1 = p.y;
-    iter += 1;
-  } while (ok === 0 && iter < 15);
-  if (iter >= 15) {
-    //...reportError("PHI3Z-CONV:Latitude failed to converge after 15 iterations");
-    //console.log('iter:', iter);
-    return null;
-  }
-
-  return (p);
-};
-exports.names = ["Krovak", "krovak"];
-},{"../common":4}],29:[function(require,module,exports){
-var common = require('../common');
-/*
-  reference
-    "New Equal-Area Map Projections for Noncircular Regions", John P. Snyder,
-    The American Cartographer, Vol 15, No. 4, October 1988, pp. 341-355.
-  */
-
-exports.S_POLE = 1;
-exports.N_POLE = 2;
-exports.EQUIT = 3;
-exports.OBLIQ = 4;
-
-
-/* Initialize the Lambert Azimuthal Equal Area projection
-  ------------------------------------------------------*/
-exports.init = function() {
-  var t = Math.abs(this.lat0);
-  if (Math.abs(t - common.HALF_PI) < common.EPSLN) {
-    this.mode = this.lat0 < 0 ? this.S_POLE : this.N_POLE;
-  }
-  else if (Math.abs(t) < common.EPSLN) {
-    this.mode = this.EQUIT;
-  }
-  else {
-    this.mode = this.OBLIQ;
-  }
-  if (this.es > 0) {
-    var sinphi;
-
-    this.qp = common.qsfnz(this.e, 1);
-    this.mmf = 0.5 / (1 - this.es);
-    this.apa = this.authset(this.es);
-    switch (this.mode) {
-    case this.N_POLE:
-      this.dd = 1;
-      break;
-    case this.S_POLE:
-      this.dd = 1;
-      break;
-    case this.EQUIT:
-      this.rq = Math.sqrt(0.5 * this.qp);
-      this.dd = 1 / this.rq;
-      this.xmf = 1;
-      this.ymf = 0.5 * this.qp;
-      break;
-    case this.OBLIQ:
-      this.rq = Math.sqrt(0.5 * this.qp);
-      sinphi = Math.sin(this.lat0);
-      this.sinb1 = common.qsfnz(this.e, sinphi) / this.qp;
-      this.cosb1 = Math.sqrt(1 - this.sinb1 * this.sinb1);
-      this.dd = Math.cos(this.lat0) / (Math.sqrt(1 - this.es * sinphi * sinphi) * this.rq * this.cosb1);
-      this.ymf = (this.xmf = this.rq) / this.dd;
-      this.xmf *= this.dd;
-      break;
-    }
-  }
-  else {
-    if (this.mode === this.OBLIQ) {
-      this.sinph0 = Math.sin(this.lat0);
-      this.cosph0 = Math.cos(this.lat0);
-    }
-  }
-};
-
-/* Lambert Azimuthal Equal Area forward equations--mapping lat,long to x,y
-  -----------------------------------------------------------------------*/
-exports.forward = function(p) {
-
-  /* Forward equations
-      -----------------*/
-  var x, y, coslam, sinlam, sinphi, q, sinb, cosb, b, cosphi;
-  var lam = p.x;
-  var phi = p.y;
-
-  lam = common.adjust_lon(lam - this.long0);
-
-  if (this.sphere) {
-    sinphi = Math.sin(phi);
-    cosphi = Math.cos(phi);
-    coslam = Math.cos(lam);
-    if (this.mode === this.OBLIQ || this.mode === this.EQUIT) {
-      y = (this.mode === this.EQUIT) ? 1 + cosphi * coslam : 1 + this.sinph0 * sinphi + this.cosph0 * cosphi * coslam;
-      if (y <= common.EPSLN) {
-        //...reportError("laea:fwd:y less than eps");
-        return null;
-      }
-      y = Math.sqrt(2 / y);
-      x = y * cosphi * Math.sin(lam);
-      y *= (this.mode === this.EQUIT) ? sinphi : this.cosph0 * sinphi - this.sinph0 * cosphi * coslam;
-    }
-    else if (this.mode === this.N_POLE || this.mode === this.S_POLE) {
-      if (this.mode === this.N_POLE) {
-        coslam = -coslam;
-      }
-      if (Math.abs(phi + this.phi0) < common.EPSLN) {
-        //...reportError("laea:fwd:phi < eps");
-        return null;
-      }
-      y = common.FORTPI - phi * 0.5;
-      y = 2 * ((this.mode === this.S_POLE) ? Math.cos(y) : Math.sin(y));
-      x = y * Math.sin(lam);
-      y *= coslam;
-    }
-  }
-  else {
-    sinb = 0;
-    cosb = 0;
-    b = 0;
-    coslam = Math.cos(lam);
-    sinlam = Math.sin(lam);
-    sinphi = Math.sin(phi);
-    q = common.qsfnz(this.e, sinphi);
-    if (this.mode === this.OBLIQ || this.mode === this.EQUIT) {
-      sinb = q / this.qp;
-      cosb = Math.sqrt(1 - sinb * sinb);
-    }
-    switch (this.mode) {
-    case this.OBLIQ:
-      b = 1 + this.sinb1 * sinb + this.cosb1 * cosb * coslam;
-      break;
-    case this.EQUIT:
-      b = 1 + cosb * coslam;
-      break;
-    case this.N_POLE:
-      b = common.HALF_PI + phi;
-      q = this.qp - q;
-      break;
-    case this.S_POLE:
-      b = phi - common.HALF_PI;
-      q = this.qp + q;
-      break;
-    }
-    if (Math.abs(b) < common.EPSLN) {
-      //...reportError("laea:fwd:b < eps");
-      return null;
-    }
-    switch (this.mode) {
-    case this.OBLIQ:
-    case this.EQUIT:
-      b = Math.sqrt(2 / b);
-      if (this.mode === this.OBLIQ) {
-        y = this.ymf * b * (this.cosb1 * sinb - this.sinb1 * cosb * coslam);
-      }
-      else {
-        y = (b = Math.sqrt(2 / (1 + cosb * coslam))) * sinb * this.ymf;
-      }
-      x = this.xmf * b * cosb * sinlam;
-      break;
-    case this.N_POLE:
-    case this.S_POLE:
-      if (q >= 0) {
-        x = (b = Math.sqrt(q)) * sinlam;
-        y = coslam * ((this.mode === this.S_POLE) ? b : -b);
-      }
-      else {
-        x = y = 0;
-      }
-      break;
-    }
-  }
-
-  //v 1
-  /*
-    var sin_lat=Math.sin(lat);
-    var cos_lat=Math.cos(lat);
-
-    var sin_delta_lon=Math.sin(delta_lon);
-    var cos_delta_lon=Math.cos(delta_lon);
-
-    var g =this.sin_lat_o * sin_lat +this.cos_lat_o * cos_lat * cos_delta_lon;
-    if (g == -1) {
-      //...reportError("laea:fwd:Point projects to a circle of radius "+ 2 * R);
-      return null;
-    }
-    var ksp = this.a * Math.sqrt(2 / (1 + g));
-    var x = ksp * cos_lat * sin_delta_lon + this.x0;
-    var y = ksp * (this.cos_lat_o * sin_lat - this.sin_lat_o * cos_lat * cos_delta_lon) + this.y0;
-    */
-  p.x = this.a * x + this.x0;
-  p.y = this.a * y + this.y0;
-  return p;
-};
-
-/* Inverse equations
-  -----------------*/
-exports.inverse = function(p) {
-  p.x -= this.x0;
-  p.y -= this.y0;
-  var x = p.x / this.a;
-  var y = p.y / this.a;
-  var lam, phi, cCe, sCe, q, rho, ab;
-
-  if (this.sphere) {
-    var cosz = 0,
-      rh, sinz = 0;
-
-    rh = Math.sqrt(x * x + y * y);
-    phi = rh * 0.5;
-    if (phi > 1) {
-      //...reportError("laea:Inv:DataError");
-      return null;
-    }
-    phi = 2 * Math.asin(phi);
-    if (this.mode === this.OBLIQ || this.mode === this.EQUIT) {
-      sinz = Math.sin(phi);
-      cosz = Math.cos(phi);
-    }
-    switch (this.mode) {
-    case this.EQUIT:
-      phi = (Math.abs(rh) <= common.EPSLN) ? 0 : Math.asin(y * sinz / rh);
-      x *= sinz;
-      y = cosz * rh;
-      break;
-    case this.OBLIQ:
-      phi = (Math.abs(rh) <= common.EPSLN) ? this.phi0 : Math.asin(cosz * this.sinph0 + y * sinz * this.cosph0 / rh);
-      x *= sinz * this.cosph0;
-      y = (cosz - Math.sin(phi) * this.sinph0) * rh;
-      break;
-    case this.N_POLE:
-      y = -y;
-      phi = common.HALF_PI - phi;
-      break;
-    case this.S_POLE:
-      phi -= common.HALF_PI;
-      break;
-    }
-    lam = (y === 0 && (this.mode === this.EQUIT || this.mode === this.OBLIQ)) ? 0 : Math.atan2(x, y);
-  }
-  else {
-    ab = 0;
-    if (this.mode === this.OBLIQ || this.mode === this.EQUIT) {
-      x /= this.dd;
-      y *= this.dd;
-      rho = Math.sqrt(x * x + y * y);
-      if (rho < common.EPSLN) {
-        p.x = 0;
-        p.y = this.phi0;
-        return p;
-      }
-      sCe = 2 * Math.asin(0.5 * rho / this.rq);
-      cCe = Math.cos(sCe);
-      x *= (sCe = Math.sin(sCe));
-      if (this.mode === this.OBLIQ) {
-        ab = cCe * this.sinb1 + y * sCe * this.cosb1 / rho;
-        q = this.qp * ab;
-        y = rho * this.cosb1 * cCe - y * this.sinb1 * sCe;
-      }
-      else {
-        ab = y * sCe / rho;
-        q = this.qp * ab;
-        y = rho * cCe;
-      }
-    }
-    else if (this.mode === this.N_POLE || this.mode === this.S_POLE) {
-      if (this.mode === this.N_POLE) {
-        y = -y;
-      }
-      q = (x * x + y * y);
-      if (!q) {
-        p.x = 0;
-        p.y = this.phi0;
-        return p;
-      }
-      /*
-          q = this.qp - q;
-          */
-      ab = 1 - q / this.qp;
-      if (this.mode === this.S_POLE) {
-        ab = -ab;
-      }
-    }
-    lam = Math.atan2(x, y);
-    phi = this.authlat(Math.asin(ab), this.apa);
-  }
-
-  /*
-    var Rh = Math.Math.sqrt(p.x *p.x +p.y * p.y);
-    var temp = Rh / (2 * this.a);
-
-    if (temp > 1) {
-      ...reportError("laea:Inv:DataError");
-      return null;
-    }
-
-    var z = 2 * common.asinz(temp);
-    var sin_z=Math.sin(z);
-    var cos_z=Math.cos(z);
-
-    var lon =this.long0;
-    if (Math.abs(Rh) > common.EPSLN) {
-       var lat = common.asinz(this.sin_lat_o * cos_z +this. cos_lat_o * sin_z *p.y / Rh);
-       var temp =Math.abs(this.lat0) - common.HALF_PI;
-       if (Math.abs(temp) > common.EPSLN) {
-          temp = cos_z -this.sin_lat_o * Math.sin(lat);
-          if(temp!=0) lon=common.adjust_lon(this.long0+Math.atan2(p.x*sin_z*this.cos_lat_o,temp*Rh));
-       } else if (this.lat0 < 0) {
-          lon = common.adjust_lon(this.long0 - Math.atan2(-p.x,p.y));
-       } else {
-          lon = common.adjust_lon(this.long0 + Math.atan2(p.x, -p.y));
-       }
-    } else {
-      lat = this.lat0;
-    }
-    */
-  //return(OK);
-  p.x = common.adjust_lon(this.long0 + lam);
-  p.y = phi;
-  return p;
-}; //lamazInv()
-
-/* determine latitude from authalic latitude */
-exports.P00 = 0.33333333333333333333;
-exports.P01 = 0.17222222222222222222;
-exports.P02 = 0.10257936507936507936;
-exports.P10 = 0.06388888888888888888;
-exports.P11 = 0.06640211640211640211;
-exports.P20 = 0.01641501294219154443;
-
-exports.authset = function(es) {
-  var t;
-  var APA = [];
-  APA[0] = es * this.P00;
-  t = es * es;
-  APA[0] += t * this.P01;
-  APA[1] = t * this.P10;
-  t *= es;
-  APA[0] += t * this.P02;
-  APA[1] += t * this.P11;
-  APA[2] = t * this.P20;
-  return APA;
-};
-
-exports.authlat = function(beta, APA) {
-  var t = beta + beta;
-  return (beta + APA[0] * Math.sin(t) + APA[1] * Math.sin(t + t) + APA[2] * Math.sin(t + t + t));
-};
-exports.names = ["Lambert Azimuthal Equal Area", "Lambert_Azimuthal_Equal_Area", "laea"];
-
-},{"../common":4}],30:[function(require,module,exports){
-var common = require('../common');
-exports.init = function() {
-
-  // array of:  r_maj,r_min,lat1,lat2,c_lon,c_lat,false_east,false_north
-  //double c_lat;                   /* center latitude                      */
-  //double c_lon;                   /* center longitude                     */
-  //double lat1;                    /* first standard parallel              */
-  //double lat2;                    /* second standard parallel             */
-  //double r_maj;                   /* major axis                           */
-  //double r_min;                   /* minor axis                           */
-  //double false_east;              /* x offset in meters                   */
-  //double false_north;             /* y offset in meters                   */
-
-  if (!this.lat2) {
-    this.lat2 = this.lat1;
-  } //if lat2 is not defined
-  if (!this.k0) {
-    this.k0 = 1;
-  }
-
-  // Standard Parallels cannot be equal and on opposite sides of the equator
-  if (Math.abs(this.lat1 + this.lat2) < common.EPSLN) {
-    //...reportError("lcc:init: Equal Latitudes");
-    return;
-  }
-
-  var temp = this.b / this.a;
-  this.e = Math.sqrt(1 - temp * temp);
-
-  var sin1 = Math.sin(this.lat1);
-  var cos1 = Math.cos(this.lat1);
-  var ms1 = common.msfnz(this.e, sin1, cos1);
-  var ts1 = common.tsfnz(this.e, this.lat1, sin1);
-
-  var sin2 = Math.sin(this.lat2);
-  var cos2 = Math.cos(this.lat2);
-  var ms2 = common.msfnz(this.e, sin2, cos2);
-  var ts2 = common.tsfnz(this.e, this.lat2, sin2);
-
-  var ts0 = common.tsfnz(this.e, this.lat0, Math.sin(this.lat0));
-
-  if (Math.abs(this.lat1 - this.lat2) > common.EPSLN) {
-    this.ns = Math.log(ms1 / ms2) / Math.log(ts1 / ts2);
-  }
-  else {
-    this.ns = sin1;
-  }
-  if (isNaN(this.ns)) {
-    this.ns = sin1;
-  }
-  this.f0 = ms1 / (this.ns * Math.pow(ts1, this.ns));
-  this.rh = this.a * this.f0 * Math.pow(ts0, this.ns);
-  if (!this.title) {
-    this.title = "Lambert Conformal Conic";
-  }
-};
-
-
-// Lambert Conformal conic forward equations--mapping lat,long to x,y
-// -----------------------------------------------------------------
-exports.forward = function(p) {
-
-  var lon = p.x;
-  var lat = p.y;
-
-  // singular cases :
-  if (Math.abs(2 * Math.abs(lat) - common.PI) <= common.EPSLN) {
-    lat = common.sign(lat) * (common.HALF_PI - 2 * common.EPSLN);
-  }
-
-  var con = Math.abs(Math.abs(lat) - common.HALF_PI);
-  var ts, rh1;
-  if (con > common.EPSLN) {
-    ts = common.tsfnz(this.e, lat, Math.sin(lat));
-    rh1 = this.a * this.f0 * Math.pow(ts, this.ns);
-  }
-  else {
-    con = lat * this.ns;
-    if (con <= 0) {
-      //...reportError("lcc:forward: No Projection");
-      return null;
-    }
-    rh1 = 0;
-  }
-  var theta = this.ns * common.adjust_lon(lon - this.long0);
-  p.x = this.k0 * (rh1 * Math.sin(theta)) + this.x0;
-  p.y = this.k0 * (this.rh - rh1 * Math.cos(theta)) + this.y0;
-
-  return p;
-};
-
-// Lambert Conformal Conic inverse equations--mapping x,y to lat/long
-// -----------------------------------------------------------------
-exports.inverse = function(p) {
-
-  var rh1, con, ts;
-  var lat, lon;
-  var x = (p.x - this.x0) / this.k0;
-  var y = (this.rh - (p.y - this.y0) / this.k0);
-  if (this.ns > 0) {
-    rh1 = Math.sqrt(x * x + y * y);
-    con = 1;
-  }
-  else {
-    rh1 = -Math.sqrt(x * x + y * y);
-    con = -1;
-  }
-  var theta = 0;
-  if (rh1 !== 0) {
-    theta = Math.atan2((con * x), (con * y));
-  }
-  if ((rh1 !== 0) || (this.ns > 0)) {
-    con = 1 / this.ns;
-    ts = Math.pow((rh1 / (this.a * this.f0)), con);
-    lat = common.phi2z(this.e, ts);
-    if (lat === -9999) {
-      return null;
-    }
-  }
-  else {
-    lat = -common.HALF_PI;
-  }
-  lon = common.adjust_lon(theta / this.ns + this.long0);
-
-  p.x = lon;
-  p.y = lat;
-  return p;
-};
-
-exports.names = ["Lambert Tangential Conformal Conic Projection", "Lambert_Conformal_Conic", "Lambert_Conformal_Conic_2SP", "lcc"];
-
-},{"../common":4}],31:[function(require,module,exports){
-exports.init = function() {
-  //no-op for longlat
-};
-
-function identity(pt) {
-  return pt;
-}
-exports.forward = identity;
-exports.inverse = identity;
-exports.names = ["longlat", "identity"];
-
-},{}],32:[function(require,module,exports){
-var common = require('../common');
-exports.init = function() {
-  var con = this.b / this.a;
-  this.es = 1 - con * con;
-  this.e = Math.sqrt(this.es);
-  if (this.lat_ts) {
-    if (this.sphere) {
-      this.k0 = Math.cos(this.lat_ts);
-    }
-    else {
-      this.k0 = common.msfnz(this.e, Math.sin(this.lat_ts), Math.cos(this.lat_ts));
-    }
-  }
-  else {
-    if (!this.k0) {
-      if (this.k) {
-        this.k0 = this.k;
-      }
-      else {
-        this.k0 = 1;
-      }
-    }
-  }
-};
-
-/* Mercator forward equations--mapping lat,long to x,y
-  --------------------------------------------------*/
-
-exports.forward = function(p) {
-  //alert("ll2m coords : "+coords);
-  var lon = p.x;
-  var lat = p.y;
-  // convert to radians
-  if (lat * common.R2D > 90 && lat * common.R2D < -90 && lon * common.R2D > 180 && lon * common.R2D < -180) {
-    //...reportError("merc:forward: llInputOutOfRange: " + lon + " : " + lat);
-    return null;
-  }
-
-  var x, y;
-  if (Math.abs(Math.abs(lat) - common.HALF_PI) <= common.EPSLN) {
-    //...reportError("merc:forward: ll2mAtPoles");
-    return null;
-  }
-  else {
-    if (this.sphere) {
-      x = this.x0 + this.a * this.k0 * common.adjust_lon(lon - this.long0);
-      y = this.y0 + this.a * this.k0 * Math.log(Math.tan(common.FORTPI + 0.5 * lat));
-    }
-    else {
-      var sinphi = Math.sin(lat);
-      var ts = common.tsfnz(this.e, lat, sinphi);
-      x = this.x0 + this.a * this.k0 * common.adjust_lon(lon - this.long0);
-      y = this.y0 - this.a * this.k0 * Math.log(ts);
-    }
-    p.x = x;
-    p.y = y;
-    return p;
-  }
-};
-
-
-/* Mercator inverse equations--mapping x,y to lat/long
-  --------------------------------------------------*/
-exports.inverse = function(p) {
-
-  var x = p.x - this.x0;
-  var y = p.y - this.y0;
-  var lon, lat;
-
-  if (this.sphere) {
-    lat = common.HALF_PI - 2 * Math.atan(Math.exp(-y / (this.a * this.k0)));
-  }
-  else {
-    var ts = Math.exp(-y / (this.a * this.k0));
-    lat = common.phi2z(this.e, ts);
-    if (lat === -9999) {
-      //...reportError("merc:inverse: lat = -9999");
-      return null;
-    }
-  }
-  lon = common.adjust_lon(this.long0 + x / (this.a * this.k0));
-
-  p.x = lon;
-  p.y = lat;
-  return p;
-};
-
-exports.names = ["Mercator", "Popular Visualisation Pseudo Mercator", "Mercator_1SP", "Mercator_Auxiliary_Sphere", "merc"];
-
-},{"../common":4}],33:[function(require,module,exports){
-var common = require('../common');
-/*
-  reference
-    "New Equal-Area Map Projections for Noncircular Regions", John P. Snyder,
-    The American Cartographer, Vol 15, No. 4, October 1988, pp. 341-355.
-  */
-
-
-/* Initialize the Miller Cylindrical projection
-  -------------------------------------------*/
-exports.init = function() {
-  //no-op
-};
-
-
-/* Miller Cylindrical forward equations--mapping lat,long to x,y
-    ------------------------------------------------------------*/
-exports.forward = function(p) {
-  var lon = p.x;
-  var lat = p.y;
-  /* Forward equations
-      -----------------*/
-  var dlon = common.adjust_lon(lon - this.long0);
-  var x = this.x0 + this.a * dlon;
-  var y = this.y0 + this.a * Math.log(Math.tan((common.PI / 4) + (lat / 2.5))) * 1.25;
-
-  p.x = x;
-  p.y = y;
-  return p;
-};
-
-/* Miller Cylindrical inverse equations--mapping x,y to lat/long
-    ------------------------------------------------------------*/
-exports.inverse = function(p) {
-  p.x -= this.x0;
-  p.y -= this.y0;
-
-  var lon = common.adjust_lon(this.long0 + p.x / this.a);
-  var lat = 2.5 * (Math.atan(Math.exp(0.8 * p.y / this.a)) - common.PI / 4);
-
-  p.x = lon;
-  p.y = lat;
-  return p;
-};
-exports.names = ["Miller_Cylindrical", "mill"];
-
-},{"../common":4}],34:[function(require,module,exports){
-var common = require('../common');
-exports.init = function() {
-  //no-op
-};
-
-/* Mollweide forward equations--mapping lat,long to x,y
-    ----------------------------------------------------*/
-exports.forward = function(p) {
-
-  /* Forward equations
-      -----------------*/
-  var lon = p.x;
-  var lat = p.y;
-
-  var delta_lon = common.adjust_lon(lon - this.long0);
-  var theta = lat;
-  var con = common.PI * Math.sin(lat);
-
-  /* Iterate using the Newton-Raphson method to find theta
-      -----------------------------------------------------*/
-  for (var i = 0; true; i++) {
-    var delta_theta = -(theta + Math.sin(theta) - con) / (1 + Math.cos(theta));
-    theta += delta_theta;
-    if (Math.abs(delta_theta) < common.EPSLN) {
-      break;
-    }
-    if (i >= 50) {
-      //...reportError("moll:Fwd:IterationError");
-      //return(241);
-    }
-  }
-  theta /= 2;
-
-  /* If the latitude is 90 deg, force the x coordinate to be "0 + false easting"
-       this is done here because of precision problems with "cos(theta)"
-       --------------------------------------------------------------------------*/
-  if (common.PI / 2 - Math.abs(lat) < common.EPSLN) {
-    delta_lon = 0;
-  }
-  var x = 0.900316316158 * this.a * delta_lon * Math.cos(theta) + this.x0;
-  var y = 1.4142135623731 * this.a * Math.sin(theta) + this.y0;
-
-  p.x = x;
-  p.y = y;
-  return p;
-};
-
-exports.inverse = function(p) {
-  var theta;
-  var arg;
-
-  /* Inverse equations
-      -----------------*/
-  p.x -= this.x0;
-  p.y -= this.y0;
-  arg = p.y / (1.4142135623731 * this.a);
-
-  /* Because of division by zero problems, 'arg' can not be 1.  Therefore
-       a number very close to one is used instead.
-       -------------------------------------------------------------------*/
-  if (Math.abs(arg) > 0.999999999999) {
-    arg = 0.999999999999;
-  }
-  theta = Math.asin(arg);
-  var lon = common.adjust_lon(this.long0 + (p.x / (0.900316316158 * this.a * Math.cos(theta))));
-  if (lon < (-common.PI)) {
-    lon = -common.PI;
-  }
-  if (lon > common.PI) {
-    lon = common.PI;
-  }
-  arg = (2 * theta + Math.sin(2 * theta)) / common.PI;
-  if (Math.abs(arg) > 1) {
-    arg = 1;
-  }
-  var lat = Math.asin(arg);
-  //return(OK);
-
-  p.x = lon;
-  p.y = lat;
-  return p;
-};
-exports.names = ["Mollweide", "moll"];
-},{"../common":4}],35:[function(require,module,exports){
-var common = require('../common');
-/*
-  reference
-    Department of Land and Survey Technical Circular 1973/32
-      http://www.linz.govt.nz/docs/miscellaneous/nz-map-definition.pdf
-    OSG Technical Report 4.1
-      http://www.linz.govt.nz/docs/miscellaneous/nzmg.pdf
-  */
-
-/**
- * iterations: Number of iterations to refine inverse transform.
- *     0 -> km accuracy
- *     1 -> m accuracy -- suitable for most mapping applications
- *     2 -> mm accuracy
+},{}],112:[function(require,module,exports){
+
+},{}],113:[function(require,module,exports){
+/*!
+ * The buffer module from node.js, for the browser.
+ *
+ * @author   Feross Aboukhadijeh <feross@feross.org> <http://feross.org>
+ * @license  MIT
  */
-exports.iterations = 1;
 
-exports.init = function() {
-  this.A = [];
-  this.A[1] = 0.6399175073;
-  this.A[2] = -0.1358797613;
-  this.A[3] = 0.063294409;
-  this.A[4] = -0.02526853;
-  this.A[5] = 0.0117879;
-  this.A[6] = -0.0055161;
-  this.A[7] = 0.0026906;
-  this.A[8] = -0.001333;
-  this.A[9] = 0.00067;
-  this.A[10] = -0.00034;
+var base64 = require('base64-js')
+var ieee754 = require('ieee754')
+var isArray = require('is-array')
 
-  this.B_re = [];
-  this.B_im = [];
-  this.B_re[1] = 0.7557853228;
-  this.B_im[1] = 0;
-  this.B_re[2] = 0.249204646;
-  this.B_im[2] = 0.003371507;
-  this.B_re[3] = -0.001541739;
-  this.B_im[3] = 0.041058560;
-  this.B_re[4] = -0.10162907;
-  this.B_im[4] = 0.01727609;
-  this.B_re[5] = -0.26623489;
-  this.B_im[5] = -0.36249218;
-  this.B_re[6] = -0.6870983;
-  this.B_im[6] = -1.1651967;
+exports.Buffer = Buffer
+exports.SlowBuffer = Buffer
+exports.INSPECT_MAX_BYTES = 50
+Buffer.poolSize = 8192 // not used by this implementation
 
-  this.C_re = [];
-  this.C_im = [];
-  this.C_re[1] = 1.3231270439;
-  this.C_im[1] = 0;
-  this.C_re[2] = -0.577245789;
-  this.C_im[2] = -0.007809598;
-  this.C_re[3] = 0.508307513;
-  this.C_im[3] = -0.112208952;
-  this.C_re[4] = -0.15094762;
-  this.C_im[4] = 0.18200602;
-  this.C_re[5] = 1.01418179;
-  this.C_im[5] = 1.64497696;
-  this.C_re[6] = 1.9660549;
-  this.C_im[6] = 2.5127645;
-
-  this.D = [];
-  this.D[1] = 1.5627014243;
-  this.D[2] = 0.5185406398;
-  this.D[3] = -0.03333098;
-  this.D[4] = -0.1052906;
-  this.D[5] = -0.0368594;
-  this.D[6] = 0.007317;
-  this.D[7] = 0.01220;
-  this.D[8] = 0.00394;
-  this.D[9] = -0.0013;
-};
+var kMaxLength = 0x3fffffff
 
 /**
-    New Zealand Map Grid Forward  - long/lat to x/y
-    long/lat in radians
-  */
-exports.forward = function(p) {
-  var n;
-  var lon = p.x;
-  var lat = p.y;
-
-  var delta_lat = lat - this.lat0;
-  var delta_lon = lon - this.long0;
-
-  // 1. Calculate d_phi and d_psi    ...                          // and d_lambda
-  // For this algorithm, delta_latitude is in seconds of arc x 10-5, so we need to scale to those units. Longitude is radians.
-  var d_phi = delta_lat / common.SEC_TO_RAD * 1E-5;
-  var d_lambda = delta_lon;
-  var d_phi_n = 1; // d_phi^0
-
-  var d_psi = 0;
-  for (n = 1; n <= 10; n++) {
-    d_phi_n = d_phi_n * d_phi;
-    d_psi = d_psi + this.A[n] * d_phi_n;
+ * If `Buffer.TYPED_ARRAY_SUPPORT`:
+ *   === true    Use Uint8Array implementation (fastest)
+ *   === false   Use Object implementation (most compatible, even IE6)
+ *
+ * Browsers that support typed arrays are IE 10+, Firefox 4+, Chrome 7+, Safari 5.1+,
+ * Opera 11.6+, iOS 4.2+.
+ *
+ * Note:
+ *
+ * - Implementation must support adding new properties to `Uint8Array` instances.
+ *   Firefox 4-29 lacked support, fixed in Firefox 30+.
+ *   See: https://bugzilla.mozilla.org/show_bug.cgi?id=695438.
+ *
+ *  - Chrome 9-10 is missing the `TypedArray.prototype.subarray` function.
+ *
+ *  - IE10 has a broken `TypedArray.prototype.subarray` function which returns arrays of
+ *    incorrect length in some situations.
+ *
+ * We detect these buggy browsers and set `Buffer.TYPED_ARRAY_SUPPORT` to `false` so they will
+ * get the Object implementation, which is slower but will work correctly.
+ */
+Buffer.TYPED_ARRAY_SUPPORT = (function () {
+  try {
+    var buf = new ArrayBuffer(0)
+    var arr = new Uint8Array(buf)
+    arr.foo = function () { return 42 }
+    return 42 === arr.foo() && // typed array instances can be augmented
+        typeof arr.subarray === 'function' && // chrome 9-10 lack `subarray`
+        new Uint8Array(1).subarray(1, 1).byteLength === 0 // ie10 has broken `subarray`
+  } catch (e) {
+    return false
   }
-
-  // 2. Calculate theta
-  var th_re = d_psi;
-  var th_im = d_lambda;
-
-  // 3. Calculate z
-  var th_n_re = 1;
-  var th_n_im = 0; // theta^0
-  var th_n_re1;
-  var th_n_im1;
-
-  var z_re = 0;
-  var z_im = 0;
-  for (n = 1; n <= 6; n++) {
-    th_n_re1 = th_n_re * th_re - th_n_im * th_im;
-    th_n_im1 = th_n_im * th_re + th_n_re * th_im;
-    th_n_re = th_n_re1;
-    th_n_im = th_n_im1;
-    z_re = z_re + this.B_re[n] * th_n_re - this.B_im[n] * th_n_im;
-    z_im = z_im + this.B_im[n] * th_n_re + this.B_re[n] * th_n_im;
-  }
-
-  // 4. Calculate easting and northing
-  p.x = (z_im * this.a) + this.x0;
-  p.y = (z_re * this.a) + this.y0;
-
-  return p;
-};
-
+})()
 
 /**
-    New Zealand Map Grid Inverse  -  x/y to long/lat
-  */
-exports.inverse = function(p) {
-  var n;
-  var x = p.x;
-  var y = p.y;
+ * Class: Buffer
+ * =============
+ *
+ * The Buffer constructor returns instances of `Uint8Array` that are augmented
+ * with function properties for all the node `Buffer` API functions. We use
+ * `Uint8Array` so that square bracket notation works as expected -- it returns
+ * a single octet.
+ *
+ * By augmenting the instances, we can avoid modifying the `Uint8Array`
+ * prototype.
+ */
+function Buffer (subject, encoding, noZero) {
+  if (!(this instanceof Buffer))
+    return new Buffer(subject, encoding, noZero)
 
-  var delta_x = x - this.x0;
-  var delta_y = y - this.y0;
+  var type = typeof subject
 
-  // 1. Calculate z
-  var z_re = delta_y / this.a;
-  var z_im = delta_x / this.a;
+  // Find the length
+  var length
+  if (type === 'number')
+    length = subject > 0 ? subject >>> 0 : 0
+  else if (type === 'string') {
+    if (encoding === 'base64')
+      subject = base64clean(subject)
+    length = Buffer.byteLength(subject, encoding)
+  } else if (type === 'object' && subject !== null) { // assume object is array-like
+    if (subject.type === 'Buffer' && isArray(subject.data))
+      subject = subject.data
+    length = +subject.length > 0 ? Math.floor(+subject.length) : 0
+  } else
+    throw new TypeError('must start with number, buffer, array or string')
 
-  // 2a. Calculate theta - first approximation gives km accuracy
-  var z_n_re = 1;
-  var z_n_im = 0; // z^0
-  var z_n_re1;
-  var z_n_im1;
+  if (this.length > kMaxLength)
+    throw new RangeError('Attempt to allocate Buffer larger than maximum ' +
+      'size: 0x' + kMaxLength.toString(16) + ' bytes')
 
-  var th_re = 0;
-  var th_im = 0;
-  for (n = 1; n <= 6; n++) {
-    z_n_re1 = z_n_re * z_re - z_n_im * z_im;
-    z_n_im1 = z_n_im * z_re + z_n_re * z_im;
-    z_n_re = z_n_re1;
-    z_n_im = z_n_im1;
-    th_re = th_re + this.C_re[n] * z_n_re - this.C_im[n] * z_n_im;
-    th_im = th_im + this.C_im[n] * z_n_re + this.C_re[n] * z_n_im;
+  var buf
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    // Preferred: Return an augmented `Uint8Array` instance for best performance
+    buf = Buffer._augment(new Uint8Array(length))
+  } else {
+    // Fallback: Return THIS instance of Buffer (created by `new`)
+    buf = this
+    buf.length = length
+    buf._isBuffer = true
   }
 
-  // 2b. Iterate to refine the accuracy of the calculation
-  //        0 iterations gives km accuracy
-  //        1 iteration gives m accuracy -- good enough for most mapping applications
-  //        2 iterations bives mm accuracy
-  for (var i = 0; i < this.iterations; i++) {
-    var th_n_re = th_re;
-    var th_n_im = th_im;
-    var th_n_re1;
-    var th_n_im1;
-
-    var num_re = z_re;
-    var num_im = z_im;
-    for (n = 2; n <= 6; n++) {
-      th_n_re1 = th_n_re * th_re - th_n_im * th_im;
-      th_n_im1 = th_n_im * th_re + th_n_re * th_im;
-      th_n_re = th_n_re1;
-      th_n_im = th_n_im1;
-      num_re = num_re + (n - 1) * (this.B_re[n] * th_n_re - this.B_im[n] * th_n_im);
-      num_im = num_im + (n - 1) * (this.B_im[n] * th_n_re + this.B_re[n] * th_n_im);
+  var i
+  if (Buffer.TYPED_ARRAY_SUPPORT && typeof subject.byteLength === 'number') {
+    // Speed optimization -- use set if we're copying from a typed array
+    buf._set(subject)
+  } else if (isArrayish(subject)) {
+    // Treat array-ish objects as a byte array
+    if (Buffer.isBuffer(subject)) {
+      for (i = 0; i < length; i++)
+        buf[i] = subject.readUInt8(i)
+    } else {
+      for (i = 0; i < length; i++)
+        buf[i] = ((subject[i] % 256) + 256) % 256
     }
-
-    th_n_re = 1;
-    th_n_im = 0;
-    var den_re = this.B_re[1];
-    var den_im = this.B_im[1];
-    for (n = 2; n <= 6; n++) {
-      th_n_re1 = th_n_re * th_re - th_n_im * th_im;
-      th_n_im1 = th_n_im * th_re + th_n_re * th_im;
-      th_n_re = th_n_re1;
-      th_n_im = th_n_im1;
-      den_re = den_re + n * (this.B_re[n] * th_n_re - this.B_im[n] * th_n_im);
-      den_im = den_im + n * (this.B_im[n] * th_n_re + this.B_re[n] * th_n_im);
-    }
-
-    // Complex division
-    var den2 = den_re * den_re + den_im * den_im;
-    th_re = (num_re * den_re + num_im * den_im) / den2;
-    th_im = (num_im * den_re - num_re * den_im) / den2;
-  }
-
-  // 3. Calculate d_phi              ...                                    // and d_lambda
-  var d_psi = th_re;
-  var d_lambda = th_im;
-  var d_psi_n = 1; // d_psi^0
-
-  var d_phi = 0;
-  for (n = 1; n <= 9; n++) {
-    d_psi_n = d_psi_n * d_psi;
-    d_phi = d_phi + this.D[n] * d_psi_n;
-  }
-
-  // 4. Calculate latitude and longitude
-  // d_phi is calcuated in second of arc * 10^-5, so we need to scale back to radians. d_lambda is in radians.
-  var lat = this.lat0 + (d_phi * common.SEC_TO_RAD * 1E5);
-  var lon = this.long0 + d_lambda;
-
-  p.x = lon;
-  p.y = lat;
-
-  return p;
-};
-exports.names = ["New_Zealand_Map_Grid", "nzmg"];
-},{"../common":4}],36:[function(require,module,exports){
-var common = require('../common');
-
-
-/* Initialize the Oblique Mercator  projection
-    ------------------------------------------*/
-exports.init = function() {
-  this.no_off = this.no_off || false;
-  this.no_rot = this.no_rot || false;
-
-  if (isNaN(this.k0)) {
-    this.k0 = 1;
-  }
-  var sinlat = Math.sin(this.lat0);
-  var coslat = Math.cos(this.lat0);
-  var con = this.e * sinlat;
-
-  this.bl = Math.sqrt(1 + this.es / (1 - this.es) * Math.pow(coslat, 4));
-  this.al = this.a * this.bl * this.k0 * Math.sqrt(1 - this.es) / (1 - con * con);
-  var t0 = common.tsfnz(this.e, this.lat0, sinlat);
-  var dl = this.bl / coslat * Math.sqrt((1 - this.es) / (1 - con * con));
-  if (dl * dl < 1) {
-    dl = 1;
-  }
-  var fl;
-  var gl;
-  if (!isNaN(this.longc)) {
-    //Central point and azimuth method
-
-    if (this.lat0 >= 0) {
-      fl = dl + Math.sqrt(dl * dl - 1);
-    }
-    else {
-      fl = dl - Math.sqrt(dl * dl - 1);
-    }
-    this.el = fl * Math.pow(t0, this.bl);
-    gl = 0.5 * (fl - 1 / fl);
-    this.gamma0 = Math.asin(Math.sin(this.alpha) / dl);
-    this.long0 = this.longc - Math.asin(gl * Math.tan(this.gamma0)) / this.bl;
-
-  }
-  else {
-    //2 points method
-    var t1 = common.tsfnz(this.e, this.lat1, Math.sin(this.lat1));
-    var t2 = common.tsfnz(this.e, this.lat2, Math.sin(this.lat2));
-    if (this.lat0 >= 0) {
-      this.el = (dl + Math.sqrt(dl * dl - 1)) * Math.pow(t0, this.bl);
-    }
-    else {
-      this.el = (dl - Math.sqrt(dl * dl - 1)) * Math.pow(t0, this.bl);
-    }
-    var hl = Math.pow(t1, this.bl);
-    var ll = Math.pow(t2, this.bl);
-    fl = this.el / hl;
-    gl = 0.5 * (fl - 1 / fl);
-    var jl = (this.el * this.el - ll * hl) / (this.el * this.el + ll * hl);
-    var pl = (ll - hl) / (ll + hl);
-    var dlon12 = common.adjust_lon(this.long1 - this.long2);
-    this.long0 = 0.5 * (this.long1 + this.long2) - Math.atan(jl * Math.tan(0.5 * this.bl * (dlon12)) / pl) / this.bl;
-    this.long0 = common.adjust_lon(this.long0);
-    var dlon10 = common.adjust_lon(this.long1 - this.long0);
-    this.gamma0 = Math.atan(Math.sin(this.bl * (dlon10)) / gl);
-    this.alpha = Math.asin(dl * Math.sin(this.gamma0));
-  }
-
-  if (this.no_off) {
-    this.uc = 0;
-  }
-  else {
-    if (this.lat0 >= 0) {
-      this.uc = this.al / this.bl * Math.atan2(Math.sqrt(dl * dl - 1), Math.cos(this.alpha));
-    }
-    else {
-      this.uc = -1 * this.al / this.bl * Math.atan2(Math.sqrt(dl * dl - 1), Math.cos(this.alpha));
+  } else if (type === 'string') {
+    buf.write(subject, 0, encoding)
+  } else if (type === 'number' && !Buffer.TYPED_ARRAY_SUPPORT && !noZero) {
+    for (i = 0; i < length; i++) {
+      buf[i] = 0
     }
   }
 
-};
+  return buf
+}
 
+Buffer.isBuffer = function (b) {
+  return !!(b != null && b._isBuffer)
+}
 
-/* Oblique Mercator forward equations--mapping lat,long to x,y
-    ----------------------------------------------------------*/
-exports.forward = function(p) {
-  var lon = p.x;
-  var lat = p.y;
-  var dlon = common.adjust_lon(lon - this.long0);
-  var us, vs;
-  var con;
-  if (Math.abs(Math.abs(lat) - common.HALF_PI) <= common.EPSLN) {
-    if (lat > 0) {
-      con = -1;
-    }
-    else {
-      con = 1;
-    }
-    vs = this.al / this.bl * Math.log(Math.tan(common.FORTPI + con * this.gamma0 * 0.5));
-    us = -1 * con * common.HALF_PI * this.al / this.bl;
+Buffer.compare = function (a, b) {
+  if (!Buffer.isBuffer(a) || !Buffer.isBuffer(b))
+    throw new TypeError('Arguments must be Buffers')
+
+  var x = a.length
+  var y = b.length
+  for (var i = 0, len = Math.min(x, y); i < len && a[i] === b[i]; i++) {}
+  if (i !== len) {
+    x = a[i]
+    y = b[i]
   }
-  else {
-    var t = common.tsfnz(this.e, lat, Math.sin(lat));
-    var ql = this.el / Math.pow(t, this.bl);
-    var sl = 0.5 * (ql - 1 / ql);
-    var tl = 0.5 * (ql + 1 / ql);
-    var vl = Math.sin(this.bl * (dlon));
-    var ul = (sl * Math.sin(this.gamma0) - vl * Math.cos(this.gamma0)) / tl;
-    if (Math.abs(Math.abs(ul) - 1) <= common.EPSLN) {
-      vs = Number.POSITIVE_INFINITY;
-    }
-    else {
-      vs = 0.5 * this.al * Math.log((1 - ul) / (1 + ul)) / this.bl;
-    }
-    if (Math.abs(Math.cos(this.bl * (dlon))) <= common.EPSLN) {
-      us = this.al * this.bl * (dlon);
-    }
-    else {
-      us = this.al * Math.atan2(sl * Math.cos(this.gamma0) + vl * Math.sin(this.gamma0), Math.cos(this.bl * dlon)) / this.bl;
-    }
+  if (x < y) return -1
+  if (y < x) return 1
+  return 0
+}
+
+Buffer.isEncoding = function (encoding) {
+  switch (String(encoding).toLowerCase()) {
+    case 'hex':
+    case 'utf8':
+    case 'utf-8':
+    case 'ascii':
+    case 'binary':
+    case 'base64':
+    case 'raw':
+    case 'ucs2':
+    case 'ucs-2':
+    case 'utf16le':
+    case 'utf-16le':
+      return true
+    default:
+      return false
+  }
+}
+
+Buffer.concat = function (list, totalLength) {
+  if (!isArray(list)) throw new TypeError('Usage: Buffer.concat(list[, length])')
+
+  if (list.length === 0) {
+    return new Buffer(0)
+  } else if (list.length === 1) {
+    return list[0]
   }
 
-  if (this.no_rot) {
-    p.x = this.x0 + us;
-    p.y = this.y0 + vs;
-  }
-  else {
-
-    us -= this.uc;
-    p.x = this.x0 + vs * Math.cos(this.alpha) + us * Math.sin(this.alpha);
-    p.y = this.y0 + us * Math.cos(this.alpha) - vs * Math.sin(this.alpha);
-  }
-  return p;
-};
-
-exports.inverse = function(p) {
-  var us, vs;
-  if (this.no_rot) {
-    vs = p.y - this.y0;
-    us = p.x - this.x0;
-  }
-  else {
-    vs = (p.x - this.x0) * Math.cos(this.alpha) - (p.y - this.y0) * Math.sin(this.alpha);
-    us = (p.y - this.y0) * Math.cos(this.alpha) + (p.x - this.x0) * Math.sin(this.alpha);
-    us += this.uc;
-  }
-  var qp = Math.exp(-1 * this.bl * vs / this.al);
-  var sp = 0.5 * (qp - 1 / qp);
-  var tp = 0.5 * (qp + 1 / qp);
-  var vp = Math.sin(this.bl * us / this.al);
-  var up = (vp * Math.cos(this.gamma0) + sp * Math.sin(this.gamma0)) / tp;
-  var ts = Math.pow(this.el / Math.sqrt((1 + up) / (1 - up)), 1 / this.bl);
-  if (Math.abs(up - 1) < common.EPSLN) {
-    p.x = this.long0;
-    p.y = common.HALF_PI;
-  }
-  else if (Math.abs(up + 1) < common.EPSLN) {
-    p.x = this.long0;
-    p.y = -1 * common.HALF_PI;
-  }
-  else {
-    p.y = common.phi2z(this.e, ts);
-    p.x = common.adjust_lon(this.long0 - Math.atan2(sp * Math.cos(this.gamma0) - vp * Math.sin(this.gamma0), Math.cos(this.bl * us / this.al)) / this.bl);
-  }
-  return p;
-};
-
-exports.names = ["Hotine_Oblique_Mercator", "Hotine Oblique Mercator", "Hotine_Oblique_Mercator_Azimuth_Natural_Origin", "Hotine_Oblique_Mercator_Azimuth_Center", "omerc"];
-},{"../common":4}],37:[function(require,module,exports){
-var common = require('../common');
-exports.init = function() {
-  /* Place parameters in static storage for common use
-      -------------------------------------------------*/
-  this.temp = this.b / this.a;
-  this.es = 1 - Math.pow(this.temp, 2); // devait etre dans tmerc.js mais n y est pas donc je commente sinon retour de valeurs nulles
-  this.e = Math.sqrt(this.es);
-  this.e0 = common.e0fn(this.es);
-  this.e1 = common.e1fn(this.es);
-  this.e2 = common.e2fn(this.es);
-  this.e3 = common.e3fn(this.es);
-  this.ml0 = this.a * common.mlfn(this.e0, this.e1, this.e2, this.e3, this.lat0); //si que des zeros le calcul ne se fait pas
-};
-
-
-/* Polyconic forward equations--mapping lat,long to x,y
-    ---------------------------------------------------*/
-exports.forward = function(p) {
-  var lon = p.x;
-  var lat = p.y;
-  var x, y, el;
-  var dlon = common.adjust_lon(lon - this.long0);
-  el = dlon * Math.sin(lat);
-  if (this.sphere) {
-    if (Math.abs(lat) <= common.EPSLN) {
-      x = this.a * dlon;
-      y = -1 * this.a * this.lat0;
-    }
-    else {
-      x = this.a * Math.sin(el) / Math.tan(lat);
-      y = this.a * (common.adjust_lat(lat - this.lat0) + (1 - Math.cos(el)) / Math.tan(lat));
-    }
-  }
-  else {
-    if (Math.abs(lat) <= common.EPSLN) {
-      x = this.a * dlon;
-      y = -1 * this.ml0;
-    }
-    else {
-      var nl = common.gN(this.a, this.e, Math.sin(lat)) / Math.tan(lat);
-      x = nl * Math.sin(el);
-      y = this.a * common.mlfn(this.e0, this.e1, this.e2, this.e3, lat) - this.ml0 + nl * (1 - Math.cos(el));
-    }
-
-  }
-  p.x = x + this.x0;
-  p.y = y + this.y0;
-  return p;
-};
-
-
-/* Inverse equations
-  -----------------*/
-exports.inverse = function(p) {
-  var lon, lat, x, y, i;
-  var al, bl;
-  var phi, dphi;
-  x = p.x - this.x0;
-  y = p.y - this.y0;
-
-  if (this.sphere) {
-    if (Math.abs(y + this.a * this.lat0) <= common.EPSLN) {
-      lon = common.adjust_lon(x / this.a + this.long0);
-      lat = 0;
-    }
-    else {
-      al = this.lat0 + y / this.a;
-      bl = x * x / this.a / this.a + al * al;
-      phi = al;
-      var tanphi;
-      for (i = common.MAX_ITER; i; --i) {
-        tanphi = Math.tan(phi);
-        dphi = -1 * (al * (phi * tanphi + 1) - phi - 0.5 * (phi * phi + bl) * tanphi) / ((phi - al) / tanphi - 1);
-        phi += dphi;
-        if (Math.abs(dphi) <= common.EPSLN) {
-          lat = phi;
-          break;
-        }
-      }
-      lon = common.adjust_lon(this.long0 + (Math.asin(x * Math.tan(phi) / this.a)) / Math.sin(lat));
-    }
-  }
-  else {
-    if (Math.abs(y + this.ml0) <= common.EPSLN) {
-      lat = 0;
-      lon = common.adjust_lon(this.long0 + x / this.a);
-    }
-    else {
-
-      al = (this.ml0 + y) / this.a;
-      bl = x * x / this.a / this.a + al * al;
-      phi = al;
-      var cl, mln, mlnp, ma;
-      var con;
-      for (i = common.MAX_ITER; i; --i) {
-        con = this.e * Math.sin(phi);
-        cl = Math.sqrt(1 - con * con) * Math.tan(phi);
-        mln = this.a * common.mlfn(this.e0, this.e1, this.e2, this.e3, phi);
-        mlnp = this.e0 - 2 * this.e1 * Math.cos(2 * phi) + 4 * this.e2 * Math.cos(4 * phi) - 6 * this.e3 * Math.cos(6 * phi);
-        ma = mln / this.a;
-        dphi = (al * (cl * ma + 1) - ma - 0.5 * cl * (ma * ma + bl)) / (this.es * Math.sin(2 * phi) * (ma * ma + bl - 2 * al * ma) / (4 * cl) + (al - ma) * (cl * mlnp - 2 / Math.sin(2 * phi)) - mlnp);
-        phi -= dphi;
-        if (Math.abs(dphi) <= common.EPSLN) {
-          lat = phi;
-          break;
-        }
-      }
-
-      //lat=phi4z(this.e,this.e0,this.e1,this.e2,this.e3,al,bl,0,0);
-      cl = Math.sqrt(1 - this.es * Math.pow(Math.sin(lat), 2)) * Math.tan(lat);
-      lon = common.adjust_lon(this.long0 + Math.asin(x * cl / this.a) / Math.sin(lat));
+  var i
+  if (totalLength === undefined) {
+    totalLength = 0
+    for (i = 0; i < list.length; i++) {
+      totalLength += list[i].length
     }
   }
 
-  p.x = lon;
-  p.y = lat;
-  return p;
-};
-exports.names = ["Polyconic", "poly"];
-},{"../common":4}],38:[function(require,module,exports){
-var common = require('../common');
-exports.init = function() {
-  /* Place parameters in static storage for common use
-    -------------------------------------------------*/
-
-
-  if (!this.sphere) {
-    this.en = common.pj_enfn(this.es);
+  var buf = new Buffer(totalLength)
+  var pos = 0
+  for (i = 0; i < list.length; i++) {
+    var item = list[i]
+    item.copy(buf, pos)
+    pos += item.length
   }
-  else {
-    this.n = 1;
-    this.m = 0;
-    this.es = 0;
-    this.C_y = Math.sqrt((this.m + 1) / this.n);
-    this.C_x = this.C_y / (this.m + 1);
+  return buf
+}
+
+Buffer.byteLength = function (str, encoding) {
+  var ret
+  str = str + ''
+  switch (encoding || 'utf8') {
+    case 'ascii':
+    case 'binary':
+    case 'raw':
+      ret = str.length
+      break
+    case 'ucs2':
+    case 'ucs-2':
+    case 'utf16le':
+    case 'utf-16le':
+      ret = str.length * 2
+      break
+    case 'hex':
+      ret = str.length >>> 1
+      break
+    case 'utf8':
+    case 'utf-8':
+      ret = utf8ToBytes(str).length
+      break
+    case 'base64':
+      ret = base64ToBytes(str).length
+      break
+    default:
+      ret = str.length
   }
+  return ret
+}
 
-};
+// pre-set for values that may exist in the future
+Buffer.prototype.length = undefined
+Buffer.prototype.parent = undefined
 
-/* Sinusoidal forward equations--mapping lat,long to x,y
-  -----------------------------------------------------*/
-exports.forward = function(p) {
-  var x, y;
-  var lon = p.x;
-  var lat = p.y;
-  /* Forward equations
-    -----------------*/
-  lon = common.adjust_lon(lon - this.long0);
+// toString(encoding, start=0, end=buffer.length)
+Buffer.prototype.toString = function (encoding, start, end) {
+  var loweredCase = false
 
-  if (this.sphere) {
-    if (!this.m) {
-      lat = this.n !== 1 ? Math.asin(this.n * Math.sin(lat)) : lat;
-    }
-    else {
-      var k = this.n * Math.sin(lat);
-      for (var i = common.MAX_ITER; i; --i) {
-        var V = (this.m * lat + Math.sin(lat) - k) / (this.m + Math.cos(lat));
-        lat -= V;
-        if (Math.abs(V) < common.EPSLN) {
-          break;
-        }
-      }
-    }
-    x = this.a * this.C_x * lon * (this.m + Math.cos(lat));
-    y = this.a * this.C_y * lat;
+  start = start >>> 0
+  end = end === undefined || end === Infinity ? this.length : end >>> 0
 
-  }
-  else {
+  if (!encoding) encoding = 'utf8'
+  if (start < 0) start = 0
+  if (end > this.length) end = this.length
+  if (end <= start) return ''
 
-    var s = Math.sin(lat);
-    var c = Math.cos(lat);
-    y = this.a * common.pj_mlfn(lat, s, c, this.en);
-    x = this.a * lon * c / Math.sqrt(1 - this.es * s * s);
-  }
+  while (true) {
+    switch (encoding) {
+      case 'hex':
+        return hexSlice(this, start, end)
 
-  p.x = x;
-  p.y = y;
-  return p;
-};
+      case 'utf8':
+      case 'utf-8':
+        return utf8Slice(this, start, end)
 
-exports.inverse = function(p) {
-  var lat, temp, lon, s;
+      case 'ascii':
+        return asciiSlice(this, start, end)
 
-  p.x -= this.x0;
-  lon = p.x / this.a;
-  p.y -= this.y0;
-  lat = p.y / this.a;
+      case 'binary':
+        return binarySlice(this, start, end)
 
-  if (this.sphere) {
-    lat /= this.C_y;
-    lon = lon / (this.C_x * (this.m + Math.cos(lat)));
-    if (this.m) {
-      lat = common.asinz((this.m * lat + Math.sin(lat)) / this.n);
-    }
-    else if (this.n !== 1) {
-      lat = common.asinz(Math.sin(lat) / this.n);
-    }
-    lon = common.adjust_lon(lon + this.long0);
-    lat = common.adjust_lat(lat);
-  }
-  else {
-    lat = common.pj_inv_mlfn(p.y / this.a, this.es, this.en);
-    s = Math.abs(lat);
-    if (s < common.HALF_PI) {
-      s = Math.sin(lat);
-      temp = this.long0 + p.x * Math.sqrt(1 - this.es * s * s) / (this.a * Math.cos(lat));
-      //temp = this.long0 + p.x / (this.a * Math.cos(lat));
-      lon = common.adjust_lon(temp);
-    }
-    else if ((s - common.EPSLN) < common.HALF_PI) {
-      lon = this.long0;
+      case 'base64':
+        return base64Slice(this, start, end)
+
+      case 'ucs2':
+      case 'ucs-2':
+      case 'utf16le':
+      case 'utf-16le':
+        return utf16leSlice(this, start, end)
+
+      default:
+        if (loweredCase)
+          throw new TypeError('Unknown encoding: ' + encoding)
+        encoding = (encoding + '').toLowerCase()
+        loweredCase = true
     }
   }
-  p.x = lon;
-  p.y = lat;
-  return p;
-};
-exports.names = ["Sinusoidal", "sinu"];
-},{"../common":4}],39:[function(require,module,exports){
+}
+
+Buffer.prototype.equals = function (b) {
+  if(!Buffer.isBuffer(b)) throw new TypeError('Argument must be a Buffer')
+  return Buffer.compare(this, b) === 0
+}
+
+Buffer.prototype.inspect = function () {
+  var str = ''
+  var max = exports.INSPECT_MAX_BYTES
+  if (this.length > 0) {
+    str = this.toString('hex', 0, max).match(/.{2}/g).join(' ')
+    if (this.length > max)
+      str += ' ... '
+  }
+  return '<Buffer ' + str + '>'
+}
+
+Buffer.prototype.compare = function (b) {
+  if (!Buffer.isBuffer(b)) throw new TypeError('Argument must be a Buffer')
+  return Buffer.compare(this, b)
+}
+
+// `get` will be removed in Node 0.13+
+Buffer.prototype.get = function (offset) {
+  console.log('.get() is deprecated. Access using array indexes instead.')
+  return this.readUInt8(offset)
+}
+
+// `set` will be removed in Node 0.13+
+Buffer.prototype.set = function (v, offset) {
+  console.log('.set() is deprecated. Access using array indexes instead.')
+  return this.writeUInt8(v, offset)
+}
+
+function hexWrite (buf, string, offset, length) {
+  offset = Number(offset) || 0
+  var remaining = buf.length - offset
+  if (!length) {
+    length = remaining
+  } else {
+    length = Number(length)
+    if (length > remaining) {
+      length = remaining
+    }
+  }
+
+  // must be an even number of digits
+  var strLen = string.length
+  if (strLen % 2 !== 0) throw new Error('Invalid hex string')
+
+  if (length > strLen / 2) {
+    length = strLen / 2
+  }
+  for (var i = 0; i < length; i++) {
+    var byte = parseInt(string.substr(i * 2, 2), 16)
+    if (isNaN(byte)) throw new Error('Invalid hex string')
+    buf[offset + i] = byte
+  }
+  return i
+}
+
+function utf8Write (buf, string, offset, length) {
+  var charsWritten = blitBuffer(utf8ToBytes(string), buf, offset, length)
+  return charsWritten
+}
+
+function asciiWrite (buf, string, offset, length) {
+  var charsWritten = blitBuffer(asciiToBytes(string), buf, offset, length)
+  return charsWritten
+}
+
+function binaryWrite (buf, string, offset, length) {
+  return asciiWrite(buf, string, offset, length)
+}
+
+function base64Write (buf, string, offset, length) {
+  var charsWritten = blitBuffer(base64ToBytes(string), buf, offset, length)
+  return charsWritten
+}
+
+function utf16leWrite (buf, string, offset, length) {
+  var charsWritten = blitBuffer(utf16leToBytes(string), buf, offset, length)
+  return charsWritten
+}
+
+Buffer.prototype.write = function (string, offset, length, encoding) {
+  // Support both (string, offset, length, encoding)
+  // and the legacy (string, encoding, offset, length)
+  if (isFinite(offset)) {
+    if (!isFinite(length)) {
+      encoding = length
+      length = undefined
+    }
+  } else {  // legacy
+    var swap = encoding
+    encoding = offset
+    offset = length
+    length = swap
+  }
+
+  offset = Number(offset) || 0
+  var remaining = this.length - offset
+  if (!length) {
+    length = remaining
+  } else {
+    length = Number(length)
+    if (length > remaining) {
+      length = remaining
+    }
+  }
+  encoding = String(encoding || 'utf8').toLowerCase()
+
+  var ret
+  switch (encoding) {
+    case 'hex':
+      ret = hexWrite(this, string, offset, length)
+      break
+    case 'utf8':
+    case 'utf-8':
+      ret = utf8Write(this, string, offset, length)
+      break
+    case 'ascii':
+      ret = asciiWrite(this, string, offset, length)
+      break
+    case 'binary':
+      ret = binaryWrite(this, string, offset, length)
+      break
+    case 'base64':
+      ret = base64Write(this, string, offset, length)
+      break
+    case 'ucs2':
+    case 'ucs-2':
+    case 'utf16le':
+    case 'utf-16le':
+      ret = utf16leWrite(this, string, offset, length)
+      break
+    default:
+      throw new TypeError('Unknown encoding: ' + encoding)
+  }
+  return ret
+}
+
+Buffer.prototype.toJSON = function () {
+  return {
+    type: 'Buffer',
+    data: Array.prototype.slice.call(this._arr || this, 0)
+  }
+}
+
+function base64Slice (buf, start, end) {
+  if (start === 0 && end === buf.length) {
+    return base64.fromByteArray(buf)
+  } else {
+    return base64.fromByteArray(buf.slice(start, end))
+  }
+}
+
+function utf8Slice (buf, start, end) {
+  var res = ''
+  var tmp = ''
+  end = Math.min(buf.length, end)
+
+  for (var i = start; i < end; i++) {
+    if (buf[i] <= 0x7F) {
+      res += decodeUtf8Char(tmp) + String.fromCharCode(buf[i])
+      tmp = ''
+    } else {
+      tmp += '%' + buf[i].toString(16)
+    }
+  }
+
+  return res + decodeUtf8Char(tmp)
+}
+
+function asciiSlice (buf, start, end) {
+  var ret = ''
+  end = Math.min(buf.length, end)
+
+  for (var i = start; i < end; i++) {
+    ret += String.fromCharCode(buf[i])
+  }
+  return ret
+}
+
+function binarySlice (buf, start, end) {
+  return asciiSlice(buf, start, end)
+}
+
+function hexSlice (buf, start, end) {
+  var len = buf.length
+
+  if (!start || start < 0) start = 0
+  if (!end || end < 0 || end > len) end = len
+
+  var out = ''
+  for (var i = start; i < end; i++) {
+    out += toHex(buf[i])
+  }
+  return out
+}
+
+function utf16leSlice (buf, start, end) {
+  var bytes = buf.slice(start, end)
+  var res = ''
+  for (var i = 0; i < bytes.length; i += 2) {
+    res += String.fromCharCode(bytes[i] + bytes[i + 1] * 256)
+  }
+  return res
+}
+
+Buffer.prototype.slice = function (start, end) {
+  var len = this.length
+  start = ~~start
+  end = end === undefined ? len : ~~end
+
+  if (start < 0) {
+    start += len;
+    if (start < 0)
+      start = 0
+  } else if (start > len) {
+    start = len
+  }
+
+  if (end < 0) {
+    end += len
+    if (end < 0)
+      end = 0
+  } else if (end > len) {
+    end = len
+  }
+
+  if (end < start)
+    end = start
+
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    return Buffer._augment(this.subarray(start, end))
+  } else {
+    var sliceLen = end - start
+    var newBuf = new Buffer(sliceLen, undefined, true)
+    for (var i = 0; i < sliceLen; i++) {
+      newBuf[i] = this[i + start]
+    }
+    return newBuf
+  }
+}
+
 /*
-  references:
-    Formules et constantes pour le Calcul pour la
-    projection cylindrique conforme à axe oblique et pour la transformation entre
-    des systèmes de référence.
-    http://www.swisstopo.admin.ch/internet/swisstopo/fr/home/topics/survey/sys/refsys/switzerland.parsysrelated1.31216.downloadList.77004.DownloadFile.tmp/swissprojectionfr.pdf
-  */
-exports.init = function() {
-  var phy0 = this.lat0;
-  this.lambda0 = this.long0;
-  var sinPhy0 = Math.sin(phy0);
-  var semiMajorAxis = this.a;
-  var invF = this.rf;
-  var flattening = 1 / invF;
-  var e2 = 2 * flattening - Math.pow(flattening, 2);
-  var e = this.e = Math.sqrt(e2);
-  this.R = this.k0 * semiMajorAxis * Math.sqrt(1 - e2) / (1 - e2 * Math.pow(sinPhy0, 2));
-  this.alpha = Math.sqrt(1 + e2 / (1 - e2) * Math.pow(Math.cos(phy0), 4));
-  this.b0 = Math.asin(sinPhy0 / this.alpha);
-  var k1 = Math.log(Math.tan(Math.PI / 4 + this.b0 / 2));
-  var k2 = Math.log(Math.tan(Math.PI / 4 + phy0 / 2));
-  var k3 = Math.log((1 + e * sinPhy0) / (1 - e * sinPhy0));
-  this.K = k1 - this.alpha * k2 + this.alpha * e / 2 * k3;
-};
+ * Need to make sure that buffer isn't trying to write out of bounds.
+ */
+function checkOffset (offset, ext, length) {
+  if ((offset % 1) !== 0 || offset < 0)
+    throw new RangeError('offset is not uint')
+  if (offset + ext > length)
+    throw new RangeError('Trying to access beyond buffer length')
+}
 
+Buffer.prototype.readUInt8 = function (offset, noAssert) {
+  if (!noAssert)
+    checkOffset(offset, 1, this.length)
+  return this[offset]
+}
 
-exports.forward = function(p) {
-  var Sa1 = Math.log(Math.tan(Math.PI / 4 - p.y / 2));
-  var Sa2 = this.e / 2 * Math.log((1 + this.e * Math.sin(p.y)) / (1 - this.e * Math.sin(p.y)));
-  var S = -this.alpha * (Sa1 + Sa2) + this.K;
+Buffer.prototype.readUInt16LE = function (offset, noAssert) {
+  if (!noAssert)
+    checkOffset(offset, 2, this.length)
+  return this[offset] | (this[offset + 1] << 8)
+}
 
-  // spheric latitude
-  var b = 2 * (Math.atan(Math.exp(S)) - Math.PI / 4);
+Buffer.prototype.readUInt16BE = function (offset, noAssert) {
+  if (!noAssert)
+    checkOffset(offset, 2, this.length)
+  return (this[offset] << 8) | this[offset + 1]
+}
 
-  // spheric longitude
-  var I = this.alpha * (p.x - this.lambda0);
+Buffer.prototype.readUInt32LE = function (offset, noAssert) {
+  if (!noAssert)
+    checkOffset(offset, 4, this.length)
 
-  // psoeudo equatorial rotation
-  var rotI = Math.atan(Math.sin(I) / (Math.sin(this.b0) * Math.tan(b) + Math.cos(this.b0) * Math.cos(I)));
+  return ((this[offset]) |
+      (this[offset + 1] << 8) |
+      (this[offset + 2] << 16)) +
+      (this[offset + 3] * 0x1000000)
+}
 
-  var rotB = Math.asin(Math.cos(this.b0) * Math.sin(b) - Math.sin(this.b0) * Math.cos(b) * Math.cos(I));
+Buffer.prototype.readUInt32BE = function (offset, noAssert) {
+  if (!noAssert)
+    checkOffset(offset, 4, this.length)
 
-  p.y = this.R / 2 * Math.log((1 + Math.sin(rotB)) / (1 - Math.sin(rotB))) + this.y0;
-  p.x = this.R * rotI + this.x0;
-  return p;
-};
+  return (this[offset] * 0x1000000) +
+      ((this[offset + 1] << 16) |
+      (this[offset + 2] << 8) |
+      this[offset + 3])
+}
 
-exports.inverse = function(p) {
-  var Y = p.x - this.x0;
-  var X = p.y - this.y0;
+Buffer.prototype.readInt8 = function (offset, noAssert) {
+  if (!noAssert)
+    checkOffset(offset, 1, this.length)
+  if (!(this[offset] & 0x80))
+    return (this[offset])
+  return ((0xff - this[offset] + 1) * -1)
+}
 
-  var rotI = Y / this.R;
-  var rotB = 2 * (Math.atan(Math.exp(X / this.R)) - Math.PI / 4);
+Buffer.prototype.readInt16LE = function (offset, noAssert) {
+  if (!noAssert)
+    checkOffset(offset, 2, this.length)
+  var val = this[offset] | (this[offset + 1] << 8)
+  return (val & 0x8000) ? val | 0xFFFF0000 : val
+}
 
-  var b = Math.asin(Math.cos(this.b0) * Math.sin(rotB) + Math.sin(this.b0) * Math.cos(rotB) * Math.cos(rotI));
-  var I = Math.atan(Math.sin(rotI) / (Math.cos(this.b0) * Math.cos(rotI) - Math.sin(this.b0) * Math.tan(rotB)));
+Buffer.prototype.readInt16BE = function (offset, noAssert) {
+  if (!noAssert)
+    checkOffset(offset, 2, this.length)
+  var val = this[offset + 1] | (this[offset] << 8)
+  return (val & 0x8000) ? val | 0xFFFF0000 : val
+}
 
-  var lambda = this.lambda0 + I / this.alpha;
+Buffer.prototype.readInt32LE = function (offset, noAssert) {
+  if (!noAssert)
+    checkOffset(offset, 4, this.length)
 
-  var S = 0;
-  var phy = b;
-  var prevPhy = -1000;
-  var iteration = 0;
-  while (Math.abs(phy - prevPhy) > 0.0000001) {
-    if (++iteration > 20) {
-      //...reportError("omercFwdInfinity");
-      return;
+  return (this[offset]) |
+      (this[offset + 1] << 8) |
+      (this[offset + 2] << 16) |
+      (this[offset + 3] << 24)
+}
+
+Buffer.prototype.readInt32BE = function (offset, noAssert) {
+  if (!noAssert)
+    checkOffset(offset, 4, this.length)
+
+  return (this[offset] << 24) |
+      (this[offset + 1] << 16) |
+      (this[offset + 2] << 8) |
+      (this[offset + 3])
+}
+
+Buffer.prototype.readFloatLE = function (offset, noAssert) {
+  if (!noAssert)
+    checkOffset(offset, 4, this.length)
+  return ieee754.read(this, offset, true, 23, 4)
+}
+
+Buffer.prototype.readFloatBE = function (offset, noAssert) {
+  if (!noAssert)
+    checkOffset(offset, 4, this.length)
+  return ieee754.read(this, offset, false, 23, 4)
+}
+
+Buffer.prototype.readDoubleLE = function (offset, noAssert) {
+  if (!noAssert)
+    checkOffset(offset, 8, this.length)
+  return ieee754.read(this, offset, true, 52, 8)
+}
+
+Buffer.prototype.readDoubleBE = function (offset, noAssert) {
+  if (!noAssert)
+    checkOffset(offset, 8, this.length)
+  return ieee754.read(this, offset, false, 52, 8)
+}
+
+function checkInt (buf, value, offset, ext, max, min) {
+  if (!Buffer.isBuffer(buf)) throw new TypeError('buffer must be a Buffer instance')
+  if (value > max || value < min) throw new TypeError('value is out of bounds')
+  if (offset + ext > buf.length) throw new TypeError('index out of range')
+}
+
+Buffer.prototype.writeUInt8 = function (value, offset, noAssert) {
+  value = +value
+  offset = offset >>> 0
+  if (!noAssert)
+    checkInt(this, value, offset, 1, 0xff, 0)
+  if (!Buffer.TYPED_ARRAY_SUPPORT) value = Math.floor(value)
+  this[offset] = value
+  return offset + 1
+}
+
+function objectWriteUInt16 (buf, value, offset, littleEndian) {
+  if (value < 0) value = 0xffff + value + 1
+  for (var i = 0, j = Math.min(buf.length - offset, 2); i < j; i++) {
+    buf[offset + i] = (value & (0xff << (8 * (littleEndian ? i : 1 - i)))) >>>
+      (littleEndian ? i : 1 - i) * 8
+  }
+}
+
+Buffer.prototype.writeUInt16LE = function (value, offset, noAssert) {
+  value = +value
+  offset = offset >>> 0
+  if (!noAssert)
+    checkInt(this, value, offset, 2, 0xffff, 0)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = value
+    this[offset + 1] = (value >>> 8)
+  } else objectWriteUInt16(this, value, offset, true)
+  return offset + 2
+}
+
+Buffer.prototype.writeUInt16BE = function (value, offset, noAssert) {
+  value = +value
+  offset = offset >>> 0
+  if (!noAssert)
+    checkInt(this, value, offset, 2, 0xffff, 0)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value >>> 8)
+    this[offset + 1] = value
+  } else objectWriteUInt16(this, value, offset, false)
+  return offset + 2
+}
+
+function objectWriteUInt32 (buf, value, offset, littleEndian) {
+  if (value < 0) value = 0xffffffff + value + 1
+  for (var i = 0, j = Math.min(buf.length - offset, 4); i < j; i++) {
+    buf[offset + i] = (value >>> (littleEndian ? i : 3 - i) * 8) & 0xff
+  }
+}
+
+Buffer.prototype.writeUInt32LE = function (value, offset, noAssert) {
+  value = +value
+  offset = offset >>> 0
+  if (!noAssert)
+    checkInt(this, value, offset, 4, 0xffffffff, 0)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset + 3] = (value >>> 24)
+    this[offset + 2] = (value >>> 16)
+    this[offset + 1] = (value >>> 8)
+    this[offset] = value
+  } else objectWriteUInt32(this, value, offset, true)
+  return offset + 4
+}
+
+Buffer.prototype.writeUInt32BE = function (value, offset, noAssert) {
+  value = +value
+  offset = offset >>> 0
+  if (!noAssert)
+    checkInt(this, value, offset, 4, 0xffffffff, 0)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value >>> 24)
+    this[offset + 1] = (value >>> 16)
+    this[offset + 2] = (value >>> 8)
+    this[offset + 3] = value
+  } else objectWriteUInt32(this, value, offset, false)
+  return offset + 4
+}
+
+Buffer.prototype.writeInt8 = function (value, offset, noAssert) {
+  value = +value
+  offset = offset >>> 0
+  if (!noAssert)
+    checkInt(this, value, offset, 1, 0x7f, -0x80)
+  if (!Buffer.TYPED_ARRAY_SUPPORT) value = Math.floor(value)
+  if (value < 0) value = 0xff + value + 1
+  this[offset] = value
+  return offset + 1
+}
+
+Buffer.prototype.writeInt16LE = function (value, offset, noAssert) {
+  value = +value
+  offset = offset >>> 0
+  if (!noAssert)
+    checkInt(this, value, offset, 2, 0x7fff, -0x8000)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = value
+    this[offset + 1] = (value >>> 8)
+  } else objectWriteUInt16(this, value, offset, true)
+  return offset + 2
+}
+
+Buffer.prototype.writeInt16BE = function (value, offset, noAssert) {
+  value = +value
+  offset = offset >>> 0
+  if (!noAssert)
+    checkInt(this, value, offset, 2, 0x7fff, -0x8000)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value >>> 8)
+    this[offset + 1] = value
+  } else objectWriteUInt16(this, value, offset, false)
+  return offset + 2
+}
+
+Buffer.prototype.writeInt32LE = function (value, offset, noAssert) {
+  value = +value
+  offset = offset >>> 0
+  if (!noAssert)
+    checkInt(this, value, offset, 4, 0x7fffffff, -0x80000000)
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = value
+    this[offset + 1] = (value >>> 8)
+    this[offset + 2] = (value >>> 16)
+    this[offset + 3] = (value >>> 24)
+  } else objectWriteUInt32(this, value, offset, true)
+  return offset + 4
+}
+
+Buffer.prototype.writeInt32BE = function (value, offset, noAssert) {
+  value = +value
+  offset = offset >>> 0
+  if (!noAssert)
+    checkInt(this, value, offset, 4, 0x7fffffff, -0x80000000)
+  if (value < 0) value = 0xffffffff + value + 1
+  if (Buffer.TYPED_ARRAY_SUPPORT) {
+    this[offset] = (value >>> 24)
+    this[offset + 1] = (value >>> 16)
+    this[offset + 2] = (value >>> 8)
+    this[offset + 3] = value
+  } else objectWriteUInt32(this, value, offset, false)
+  return offset + 4
+}
+
+function checkIEEE754 (buf, value, offset, ext, max, min) {
+  if (value > max || value < min) throw new TypeError('value is out of bounds')
+  if (offset + ext > buf.length) throw new TypeError('index out of range')
+}
+
+function writeFloat (buf, value, offset, littleEndian, noAssert) {
+  if (!noAssert)
+    checkIEEE754(buf, value, offset, 4, 3.4028234663852886e+38, -3.4028234663852886e+38)
+  ieee754.write(buf, value, offset, littleEndian, 23, 4)
+  return offset + 4
+}
+
+Buffer.prototype.writeFloatLE = function (value, offset, noAssert) {
+  return writeFloat(this, value, offset, true, noAssert)
+}
+
+Buffer.prototype.writeFloatBE = function (value, offset, noAssert) {
+  return writeFloat(this, value, offset, false, noAssert)
+}
+
+function writeDouble (buf, value, offset, littleEndian, noAssert) {
+  if (!noAssert)
+    checkIEEE754(buf, value, offset, 8, 1.7976931348623157E+308, -1.7976931348623157E+308)
+  ieee754.write(buf, value, offset, littleEndian, 52, 8)
+  return offset + 8
+}
+
+Buffer.prototype.writeDoubleLE = function (value, offset, noAssert) {
+  return writeDouble(this, value, offset, true, noAssert)
+}
+
+Buffer.prototype.writeDoubleBE = function (value, offset, noAssert) {
+  return writeDouble(this, value, offset, false, noAssert)
+}
+
+// copy(targetBuffer, targetStart=0, sourceStart=0, sourceEnd=buffer.length)
+Buffer.prototype.copy = function (target, target_start, start, end) {
+  var source = this
+
+  if (!start) start = 0
+  if (!end && end !== 0) end = this.length
+  if (!target_start) target_start = 0
+
+  // Copy 0 bytes; we're done
+  if (end === start) return
+  if (target.length === 0 || source.length === 0) return
+
+  // Fatal error conditions
+  if (end < start) throw new TypeError('sourceEnd < sourceStart')
+  if (target_start < 0 || target_start >= target.length)
+    throw new TypeError('targetStart out of bounds')
+  if (start < 0 || start >= source.length) throw new TypeError('sourceStart out of bounds')
+  if (end < 0 || end > source.length) throw new TypeError('sourceEnd out of bounds')
+
+  // Are we oob?
+  if (end > this.length)
+    end = this.length
+  if (target.length - target_start < end - start)
+    end = target.length - target_start + start
+
+  var len = end - start
+
+  if (len < 100 || !Buffer.TYPED_ARRAY_SUPPORT) {
+    for (var i = 0; i < len; i++) {
+      target[i + target_start] = this[i + start]
     }
-    //S = Math.log(Math.tan(Math.PI / 4 + phy / 2));
-    S = 1 / this.alpha * (Math.log(Math.tan(Math.PI / 4 + b / 2)) - this.K) + this.e * Math.log(Math.tan(Math.PI / 4 + Math.asin(this.e * Math.sin(phy)) / 2));
-    prevPhy = phy;
-    phy = 2 * Math.atan(Math.exp(S)) - Math.PI / 2;
+  } else {
+    target._set(this.subarray(start, start + len), target_start)
+  }
+}
+
+// fill(value, start=0, end=buffer.length)
+Buffer.prototype.fill = function (value, start, end) {
+  if (!value) value = 0
+  if (!start) start = 0
+  if (!end) end = this.length
+
+  if (end < start) throw new TypeError('end < start')
+
+  // Fill 0 bytes; we're done
+  if (end === start) return
+  if (this.length === 0) return
+
+  if (start < 0 || start >= this.length) throw new TypeError('start out of bounds')
+  if (end < 0 || end > this.length) throw new TypeError('end out of bounds')
+
+  var i
+  if (typeof value === 'number') {
+    for (i = start; i < end; i++) {
+      this[i] = value
+    }
+  } else {
+    var bytes = utf8ToBytes(value.toString())
+    var len = bytes.length
+    for (i = start; i < end; i++) {
+      this[i] = bytes[i % len]
+    }
   }
 
-  p.x = lambda;
-  p.y = phy;
-  return p;
-};
-
-exports.names = ["somerc"];
-
-},{}],40:[function(require,module,exports){
-var common = require('../common');
-exports.ssfn_ = function(phit, sinphi, eccen) {
-  sinphi *= eccen;
-  return (Math.tan(0.5 * (common.HALF_PI + phit)) * Math.pow((1 - sinphi) / (1 + sinphi), 0.5 * eccen));
-};
-
-exports.init = function() {
-  this.coslat0 = Math.cos(this.lat0);
-  this.sinlat0 = Math.sin(this.lat0);
-  if (this.sphere) {
-    if (this.k0 === 1 && !isNaN(this.lat_ts) && Math.abs(this.coslat0) <= common.EPSLN) {
-      this.k0 = 0.5 * (1 + common.sign(this.lat0) * Math.sin(this.lat_ts));
-    }
-  }
-  else {
-    if (Math.abs(this.coslat0) <= common.EPSLN) {
-      if (this.lat0 > 0) {
-        //North pole
-        //trace('stere:north pole');
-        this.con = 1;
-      }
-      else {
-        //South pole
-        //trace('stere:south pole');
-        this.con = -1;
-      }
-    }
-    this.cons = Math.sqrt(Math.pow(1 + this.e, 1 + this.e) * Math.pow(1 - this.e, 1 - this.e));
-    if (this.k0 === 1 && !isNaN(this.lat_ts) && Math.abs(this.coslat0) <= common.EPSLN) {
-      this.k0 = 0.5 * this.cons * common.msfnz(this.e, Math.sin(this.lat_ts), Math.cos(this.lat_ts)) / common.tsfnz(this.e, this.con * this.lat_ts, this.con * Math.sin(this.lat_ts));
-    }
-    this.ms1 = common.msfnz(this.e, this.sinlat0, this.coslat0);
-    this.X0 = 2 * Math.atan(this.ssfn_(this.lat0, this.sinlat0, this.e)) - common.HALF_PI;
-    this.cosX0 = Math.cos(this.X0);
-    this.sinX0 = Math.sin(this.X0);
-  }
-};
-
-// Stereographic forward equations--mapping lat,long to x,y
-exports.forward = function(p) {
-  var lon = p.x;
-  var lat = p.y;
-  var sinlat = Math.sin(lat);
-  var coslat = Math.cos(lat);
-  var A, X, sinX, cosX, ts, rh;
-  var dlon = common.adjust_lon(lon - this.long0);
-
-  if (Math.abs(Math.abs(lon - this.long0) - common.PI) <= common.EPSLN && Math.abs(lat + this.lat0) <= common.EPSLN) {
-    //case of the origine point
-    //trace('stere:this is the origin point');
-    p.x = NaN;
-    p.y = NaN;
-    return p;
-  }
-  if (this.sphere) {
-    //trace('stere:sphere case');
-    A = 2 * this.k0 / (1 + this.sinlat0 * sinlat + this.coslat0 * coslat * Math.cos(dlon));
-    p.x = this.a * A * coslat * Math.sin(dlon) + this.x0;
-    p.y = this.a * A * (this.coslat0 * sinlat - this.sinlat0 * coslat * Math.cos(dlon)) + this.y0;
-    return p;
-  }
-  else {
-    X = 2 * Math.atan(this.ssfn_(lat, sinlat, this.e)) - common.HALF_PI;
-    cosX = Math.cos(X);
-    sinX = Math.sin(X);
-    if (Math.abs(this.coslat0) <= common.EPSLN) {
-      ts = common.tsfnz(this.e, lat * this.con, this.con * sinlat);
-      rh = 2 * this.a * this.k0 * ts / this.cons;
-      p.x = this.x0 + rh * Math.sin(lon - this.long0);
-      p.y = this.y0 - this.con * rh * Math.cos(lon - this.long0);
-      //trace(p.toString());
-      return p;
-    }
-    else if (Math.abs(this.sinlat0) < common.EPSLN) {
-      //Eq
-      //trace('stere:equateur');
-      A = 2 * this.a * this.k0 / (1 + cosX * Math.cos(dlon));
-      p.y = A * sinX;
-    }
-    else {
-      //other case
-      //trace('stere:normal case');
-      A = 2 * this.a * this.k0 * this.ms1 / (this.cosX0 * (1 + this.sinX0 * sinX + this.cosX0 * cosX * Math.cos(dlon)));
-      p.y = A * (this.cosX0 * sinX - this.sinX0 * cosX * Math.cos(dlon)) + this.y0;
-    }
-    p.x = A * cosX * Math.sin(dlon) + this.x0;
-  }
-  //trace(p.toString());
-  return p;
-};
-
-
-//* Stereographic inverse equations--mapping x,y to lat/long
-exports.inverse = function(p) {
-  p.x -= this.x0;
-  p.y -= this.y0;
-  var lon, lat, ts, ce, Chi;
-  var rh = Math.sqrt(p.x * p.x + p.y * p.y);
-  if (this.sphere) {
-    var c = 2 * Math.atan(rh / (0.5 * this.a * this.k0));
-    lon = this.long0;
-    lat = this.lat0;
-    if (rh <= common.EPSLN) {
-      p.x = lon;
-      p.y = lat;
-      return p;
-    }
-    lat = Math.asin(Math.cos(c) * this.sinlat0 + p.y * Math.sin(c) * this.coslat0 / rh);
-    if (Math.abs(this.coslat0) < common.EPSLN) {
-      if (this.lat0 > 0) {
-        lon = common.adjust_lon(this.long0 + Math.atan2(p.x, - 1 * p.y));
-      }
-      else {
-        lon = common.adjust_lon(this.long0 + Math.atan2(p.x, p.y));
-      }
-    }
-    else {
-      lon = common.adjust_lon(this.long0 + Math.atan2(p.x * Math.sin(c), rh * this.coslat0 * Math.cos(c) - p.y * this.sinlat0 * Math.sin(c)));
-    }
-    p.x = lon;
-    p.y = lat;
-    return p;
-  }
-  else {
-    if (Math.abs(this.coslat0) <= common.EPSLN) {
-      if (rh <= common.EPSLN) {
-        lat = this.lat0;
-        lon = this.long0;
-        p.x = lon;
-        p.y = lat;
-        //trace(p.toString());
-        return p;
-      }
-      p.x *= this.con;
-      p.y *= this.con;
-      ts = rh * this.cons / (2 * this.a * this.k0);
-      lat = this.con * common.phi2z(this.e, ts);
-      lon = this.con * common.adjust_lon(this.con * this.long0 + Math.atan2(p.x, - 1 * p.y));
-    }
-    else {
-      ce = 2 * Math.atan(rh * this.cosX0 / (2 * this.a * this.k0 * this.ms1));
-      lon = this.long0;
-      if (rh <= common.EPSLN) {
-        Chi = this.X0;
-      }
-      else {
-        Chi = Math.asin(Math.cos(ce) * this.sinX0 + p.y * Math.sin(ce) * this.cosX0 / rh);
-        lon = common.adjust_lon(this.long0 + Math.atan2(p.x * Math.sin(ce), rh * this.cosX0 * Math.cos(ce) - p.y * this.sinX0 * Math.sin(ce)));
-      }
-      lat = -1 * common.phi2z(this.e, Math.tan(0.5 * (common.HALF_PI + Chi)));
-    }
-  }
-  p.x = lon;
-  p.y = lat;
-
-  //trace(p.toString());
-  return p;
-
-};
-exports.names = ["stere"];
-},{"../common":4}],41:[function(require,module,exports){
-var common = require('../common');
-var gauss = require('./gauss');
-exports.init = function() {
-  gauss.init.apply(this);
-  if (!this.rc) {
-    //...reportError("sterea:init:E_ERROR_0");
-    return;
-  }
-  this.sinc0 = Math.sin(this.phic0);
-  this.cosc0 = Math.cos(this.phic0);
-  this.R2 = 2 * this.rc;
-  if (!this.title) {
-    this.title = "Oblique Stereographic Alternative";
-  }
-};
-
-exports.forward = function(p) {
-  var sinc, cosc, cosl, k;
-  p.x = common.adjust_lon(p.x - this.long0); /* adjust del longitude */
-  gauss.forward.apply(this, [p]);
-  sinc = Math.sin(p.y);
-  cosc = Math.cos(p.y);
-  cosl = Math.cos(p.x);
-  k = this.k0 * this.R2 / (1 + this.sinc0 * sinc + this.cosc0 * cosc * cosl);
-  p.x = k * cosc * Math.sin(p.x);
-  p.y = k * (this.cosc0 * sinc - this.sinc0 * cosc * cosl);
-  p.x = this.a * p.x + this.x0;
-  p.y = this.a * p.y + this.y0;
-  return p;
-};
-
-exports.inverse = function(p) {
-  var sinc, cosc, lon, lat, rho;
-  p.x = (p.x - this.x0) / this.a; /* descale and de-offset */
-  p.y = (p.y - this.y0) / this.a;
-
-  p.x /= this.k0;
-  p.y /= this.k0;
-  if ((rho = Math.sqrt(p.x * p.x + p.y * p.y))) {
-    var c = 2 * Math.atan2(rho, this.R2);
-    sinc = Math.sin(c);
-    cosc = Math.cos(c);
-    lat = Math.asin(cosc * this.sinc0 + p.y * sinc * this.cosc0 / rho);
-    lon = Math.atan2(p.x * sinc, rho * this.cosc0 * cosc - p.y * this.sinc0 * sinc);
-  }
-  else {
-    lat = this.phic0;
-    lon = 0;
-  }
-
-  p.x = lon;
-  p.y = lat;
-  gauss.inverse.apply(this, [p]);
-  p.x = common.adjust_lon(p.x + this.long0); /* adjust longitude to CM */
-  return p;
-};
-
-exports.names = ["Stereographic_North_Pole", "Oblique_Stereographic", "Polar_Stereographic", "sterea"];
-},{"../common":4,"./gauss":25}],42:[function(require,module,exports){
-var common = require('../common');
-exports.init = function() {
-  this.e0 = common.e0fn(this.es);
-  this.e1 = common.e1fn(this.es);
-  this.e2 = common.e2fn(this.es);
-  this.e3 = common.e3fn(this.es);
-  this.ml0 = this.a * common.mlfn(this.e0, this.e1, this.e2, this.e3, this.lat0);
-};
+  return this
+}
 
 /**
-    Transverse Mercator Forward  - long/lat to x/y
-    long/lat in radians
-  */
-exports.forward = function(p) {
-  var lon = p.x;
-  var lat = p.y;
-
-  var delta_lon = common.adjust_lon(lon - this.long0); // Delta longitude
-  var con; // cone constant
-  var x, y;
-  var sin_phi = Math.sin(lat);
-  var cos_phi = Math.cos(lat);
-
-  if (this.sphere) { /* spherical form */
-    var b = cos_phi * Math.sin(delta_lon);
-    if ((Math.abs(Math.abs(b) - 1)) < 0.0000000001) {
-      //...reportError("tmerc:forward: Point projects into infinity");
-      return (93);
-    }
-    else {
-      x = 0.5 * this.a * this.k0 * Math.log((1 + b) / (1 - b));
-      con = Math.acos(cos_phi * Math.cos(delta_lon) / Math.sqrt(1 - b * b));
-      if (lat < 0) {
-        con = -con;
+ * Creates a new `ArrayBuffer` with the *copied* memory of the buffer instance.
+ * Added in Node 0.12. Only available in browsers that support ArrayBuffer.
+ */
+Buffer.prototype.toArrayBuffer = function () {
+  if (typeof Uint8Array !== 'undefined') {
+    if (Buffer.TYPED_ARRAY_SUPPORT) {
+      return (new Buffer(this)).buffer
+    } else {
+      var buf = new Uint8Array(this.length)
+      for (var i = 0, len = buf.length; i < len; i += 1) {
+        buf[i] = this[i]
       }
-      y = this.a * this.k0 * (con - this.lat0);
+      return buf.buffer
     }
+  } else {
+    throw new TypeError('Buffer.toArrayBuffer not supported in this browser')
   }
-  else {
-    var al = cos_phi * delta_lon;
-    var als = Math.pow(al, 2);
-    var c = this.ep2 * Math.pow(cos_phi, 2);
-    var tq = Math.tan(lat);
-    var t = Math.pow(tq, 2);
-    con = 1 - this.es * Math.pow(sin_phi, 2);
-    var n = this.a / Math.sqrt(con);
-    var ml = this.a * common.mlfn(this.e0, this.e1, this.e2, this.e3, lat);
+}
 
-    x = this.k0 * n * al * (1 + als / 6 * (1 - t + c + als / 20 * (5 - 18 * t + Math.pow(t, 2) + 72 * c - 58 * this.ep2))) + this.x0;
-    y = this.k0 * (ml - this.ml0 + n * tq * (als * (0.5 + als / 24 * (5 - t + 9 * c + 4 * Math.pow(c, 2) + als / 30 * (61 - 58 * t + Math.pow(t, 2) + 600 * c - 330 * this.ep2))))) + this.y0;
+// HELPER FUNCTIONS
+// ================
 
-  }
-  p.x = x;
-  p.y = y;
-  return p;
-};
+var BP = Buffer.prototype
 
 /**
-    Transverse Mercator Inverse  -  x/y to long/lat
-  */
-exports.inverse = function(p) {
-  var con, phi; /* temporary angles       */
-  var delta_phi; /* difference between longitudes    */
-  var i;
-  var max_iter = 6; /* maximun number of iterations */
-  var lat, lon;
+ * Augment a Uint8Array *instance* (not the Uint8Array class!) with Buffer methods
+ */
+Buffer._augment = function (arr) {
+  arr._isBuffer = true
 
-  if (this.sphere) { /* spherical form */
-    var f = Math.exp(p.x / (this.a * this.k0));
-    var g = 0.5 * (f - 1 / f);
-    var temp = this.lat0 + p.y / (this.a * this.k0);
-    var h = Math.cos(temp);
-    con = Math.sqrt((1 - h * h) / (1 + g * g));
-    lat = common.asinz(con);
-    if (temp < 0) {
-      lat = -lat;
-    }
-    if ((g === 0) && (h === 0)) {
-      lon = this.long0;
-    }
-    else {
-      lon = common.adjust_lon(Math.atan2(g, h) + this.long0);
-    }
-  }
-  else { // ellipsoidal form
-    var x = p.x - this.x0;
-    var y = p.y - this.y0;
+  // save reference to original Uint8Array get/set methods before overwriting
+  arr._get = arr.get
+  arr._set = arr.set
 
-    con = (this.ml0 + y / this.k0) / this.a;
-    phi = con;
-    for (i = 0; true; i++) {
-      delta_phi = ((con + this.e1 * Math.sin(2 * phi) - this.e2 * Math.sin(4 * phi) + this.e3 * Math.sin(6 * phi)) / this.e0) - phi;
-      phi += delta_phi;
-      if (Math.abs(delta_phi) <= common.EPSLN) {
-        break;
-      }
-      if (i >= max_iter) {
-        //...reportError("tmerc:inverse: Latitude failed to converge");
-        return (95);
-      }
-    } // for()
-    if (Math.abs(phi) < common.HALF_PI) {
-      // sincos(phi, &sin_phi, &cos_phi);
-      var sin_phi = Math.sin(phi);
-      var cos_phi = Math.cos(phi);
-      var tan_phi = Math.tan(phi);
-      var c = this.ep2 * Math.pow(cos_phi, 2);
-      var cs = Math.pow(c, 2);
-      var t = Math.pow(tan_phi, 2);
-      var ts = Math.pow(t, 2);
-      con = 1 - this.es * Math.pow(sin_phi, 2);
-      var n = this.a / Math.sqrt(con);
-      var r = n * (1 - this.es) / con;
-      var d = x / (n * this.k0);
-      var ds = Math.pow(d, 2);
-      lat = phi - (n * tan_phi * ds / r) * (0.5 - ds / 24 * (5 + 3 * t + 10 * c - 4 * cs - 9 * this.ep2 - ds / 30 * (61 + 90 * t + 298 * c + 45 * ts - 252 * this.ep2 - 3 * cs)));
-      lon = common.adjust_lon(this.long0 + (d * (1 - ds / 6 * (1 + 2 * t + c - ds / 20 * (5 - 2 * c + 28 * t - 3 * cs + 8 * this.ep2 + 24 * ts))) / cos_phi));
-    }
-    else {
-      lat = common.HALF_PI * common.sign(y);
-      lon = this.long0;
-    }
-  }
-  p.x = lon;
-  p.y = lat;
-  return p;
-};
-exports.names = ["Transverse_Mercator", "Transverse Mercator", "tmerc"];
+  // deprecated, will be removed in node 0.13+
+  arr.get = BP.get
+  arr.set = BP.set
 
-},{"../common":4}],43:[function(require,module,exports){
-var common = require('../common');
-var tmerc = require('./tmerc');
-exports.dependsOn = 'tmerc';
-exports.init = function() {
-  if (!this.zone) {
-    //...reportError("utm:init: zone must be specified for UTM");
-    return;
-  }
-  this.lat0 = 0;
-  this.long0 = ((6 * Math.abs(this.zone)) - 183) * common.D2R;
-  this.x0 = 500000;
-  this.y0 = this.utmSouth ? 10000000 : 0;
-  this.k0 = 0.9996;
+  arr.write = BP.write
+  arr.toString = BP.toString
+  arr.toLocaleString = BP.toString
+  arr.toJSON = BP.toJSON
+  arr.equals = BP.equals
+  arr.compare = BP.compare
+  arr.copy = BP.copy
+  arr.slice = BP.slice
+  arr.readUInt8 = BP.readUInt8
+  arr.readUInt16LE = BP.readUInt16LE
+  arr.readUInt16BE = BP.readUInt16BE
+  arr.readUInt32LE = BP.readUInt32LE
+  arr.readUInt32BE = BP.readUInt32BE
+  arr.readInt8 = BP.readInt8
+  arr.readInt16LE = BP.readInt16LE
+  arr.readInt16BE = BP.readInt16BE
+  arr.readInt32LE = BP.readInt32LE
+  arr.readInt32BE = BP.readInt32BE
+  arr.readFloatLE = BP.readFloatLE
+  arr.readFloatBE = BP.readFloatBE
+  arr.readDoubleLE = BP.readDoubleLE
+  arr.readDoubleBE = BP.readDoubleBE
+  arr.writeUInt8 = BP.writeUInt8
+  arr.writeUInt16LE = BP.writeUInt16LE
+  arr.writeUInt16BE = BP.writeUInt16BE
+  arr.writeUInt32LE = BP.writeUInt32LE
+  arr.writeUInt32BE = BP.writeUInt32BE
+  arr.writeInt8 = BP.writeInt8
+  arr.writeInt16LE = BP.writeInt16LE
+  arr.writeInt16BE = BP.writeInt16BE
+  arr.writeInt32LE = BP.writeInt32LE
+  arr.writeInt32BE = BP.writeInt32BE
+  arr.writeFloatLE = BP.writeFloatLE
+  arr.writeFloatBE = BP.writeFloatBE
+  arr.writeDoubleLE = BP.writeDoubleLE
+  arr.writeDoubleBE = BP.writeDoubleBE
+  arr.fill = BP.fill
+  arr.inspect = BP.inspect
+  arr.toArrayBuffer = BP.toArrayBuffer
 
-  tmerc.init.apply(this);
-  this.forward = tmerc.forward;
-  this.inverse = tmerc.inverse;
-};
-exports.names = ["Universal Transverse Mercator System", "utm"];
-},{"../common":4,"./tmerc":42}],44:[function(require,module,exports){
-var common = require('../common');
-
-/* Initialize the Van Der Grinten projection
-  ----------------------------------------*/
-exports.init = function() {
-  //this.R = 6370997; //Radius of earth
-  this.R = this.a;
-};
-
-exports.forward = function(p) {
-
-  var lon = p.x;
-  var lat = p.y;
-
-  /* Forward equations
-    -----------------*/
-  var dlon = common.adjust_lon(lon - this.long0);
-  var x, y;
-
-  if (Math.abs(lat) <= common.EPSLN) {
-    x = this.x0 + this.R * dlon;
-    y = this.y0;
-  }
-  var theta = common.asinz(2 * Math.abs(lat / common.PI));
-  if ((Math.abs(dlon) <= common.EPSLN) || (Math.abs(Math.abs(lat) - common.HALF_PI) <= common.EPSLN)) {
-    x = this.x0;
-    if (lat >= 0) {
-      y = this.y0 + common.PI * this.R * Math.tan(0.5 * theta);
-    }
-    else {
-      y = this.y0 + common.PI * this.R * -Math.tan(0.5 * theta);
-    }
-    //  return(OK);
-  }
-  var al = 0.5 * Math.abs((common.PI / dlon) - (dlon / common.PI));
-  var asq = al * al;
-  var sinth = Math.sin(theta);
-  var costh = Math.cos(theta);
-
-  var g = costh / (sinth + costh - 1);
-  var gsq = g * g;
-  var m = g * (2 / sinth - 1);
-  var msq = m * m;
-  var con = common.PI * this.R * (al * (g - msq) + Math.sqrt(asq * (g - msq) * (g - msq) - (msq + asq) * (gsq - msq))) / (msq + asq);
-  if (dlon < 0) {
-    con = -con;
-  }
-  x = this.x0 + con;
-  //con = Math.abs(con / (common.PI * this.R));
-  var q = asq + g;
-  con = common.PI * this.R * (m * q - al * Math.sqrt((msq + asq) * (asq + 1) - q * q)) / (msq + asq);
-  if (lat >= 0) {
-    //y = this.y0 + common.PI * this.R * Math.sqrt(1 - con * con - 2 * al * con);
-    y = this.y0 + con;
-  }
-  else {
-    //y = this.y0 - common.PI * this.R * Math.sqrt(1 - con * con - 2 * al * con);
-    y = this.y0 - con;
-  }
-  p.x = x;
-  p.y = y;
-  return p;
-};
-
-/* Van Der Grinten inverse equations--mapping x,y to lat/long
-  ---------------------------------------------------------*/
-exports.inverse = function(p) {
-  var lon, lat;
-  var xx, yy, xys, c1, c2, c3;
-  var a1;
-  var m1;
-  var con;
-  var th1;
-  var d;
-
-  /* inverse equations
-    -----------------*/
-  p.x -= this.x0;
-  p.y -= this.y0;
-  con = common.PI * this.R;
-  xx = p.x / con;
-  yy = p.y / con;
-  xys = xx * xx + yy * yy;
-  c1 = -Math.abs(yy) * (1 + xys);
-  c2 = c1 - 2 * yy * yy + xx * xx;
-  c3 = -2 * c1 + 1 + 2 * yy * yy + xys * xys;
-  d = yy * yy / c3 + (2 * c2 * c2 * c2 / c3 / c3 / c3 - 9 * c1 * c2 / c3 / c3) / 27;
-  a1 = (c1 - c2 * c2 / 3 / c3) / c3;
-  m1 = 2 * Math.sqrt(-a1 / 3);
-  con = ((3 * d) / a1) / m1;
-  if (Math.abs(con) > 1) {
-    if (con >= 0) {
-      con = 1;
-    }
-    else {
-      con = -1;
-    }
-  }
-  th1 = Math.acos(con) / 3;
-  if (p.y >= 0) {
-    lat = (-m1 * Math.cos(th1 + common.PI / 3) - c2 / 3 / c3) * common.PI;
-  }
-  else {
-    lat = -(-m1 * Math.cos(th1 + common.PI / 3) - c2 / 3 / c3) * common.PI;
-  }
-
-  if (Math.abs(xx) < common.EPSLN) {
-    lon = this.long0;
-  }
-  else {
-    lon = common.adjust_lon(this.long0 + common.PI * (xys - 1 + Math.sqrt(1 + 2 * (xx * xx - yy * yy) + xys * xys)) / 2 / xx);
-  }
-
-  p.x = lon;
-  p.y = lat;
-  return p;
-};
-exports.names = ["Van_der_Grinten_I", "VanDerGrinten", "vandg"];
-},{"../common":4}],45:[function(require,module,exports){
-var common = require('./common');
-var datum_transform = require('./datum_transform');
-var adjust_axis = require('./adjust_axis');
-var proj = require('./Proj');
-module.exports = function transform(source, dest, point) {
-  var wgs84;
-
-  function checkNotWGS(source, dest) {
-    return ((source.datum.datum_type === common.PJD_3PARAM || source.datum.datum_type === common.PJD_7PARAM) && dest.datumCode !== "WGS84");
-  }
-
-  // Workaround for datum shifts towgs84, if either source or destination projection is not wgs84
-  if (source.datum && dest.datum && (checkNotWGS(source, dest) || checkNotWGS(dest, source))) {
-    wgs84 = new proj('WGS84');
-    transform(source, wgs84, point);
-    source = wgs84;
-  }
-  // DGR, 2010/11/12
-  if (source.axis !== "enu") {
-    adjust_axis(source, false, point);
-  }
-  // Transform source points to long/lat, if they aren't already.
-  if (source.projName === "longlat") {
-    point.x *= common.D2R; // convert degrees to radians
-    point.y *= common.D2R;
-  }
-  else {
-    if (source.to_meter) {
-      point.x *= source.to_meter;
-      point.y *= source.to_meter;
-    }
-    source.inverse(point); // Convert Cartesian to longlat
-  }
-  // Adjust for the prime meridian if necessary
-  if (source.from_greenwich) {
-    point.x += source.from_greenwich;
-  }
-
-  // Convert datums if needed, and if possible.
-  point = datum_transform(source.datum, dest.datum, point);
-
-  // Adjust for the prime meridian if necessary
-  if (dest.from_greenwich) {
-    point.x -= dest.from_greenwich;
-  }
-
-  if (dest.projName === "longlat") {
-    // convert radians to decimal degrees
-    point.x *= common.R2D;
-    point.y *= common.R2D;
-  }
-  else { // else project
-    dest.forward(point);
-    if (dest.to_meter) {
-      point.x /= dest.to_meter;
-      point.y /= dest.to_meter;
-    }
-  }
-
-  // DGR, 2010/11/12
-  if (dest.axis !== "enu") {
-    adjust_axis(dest, true, point);
-  }
-
-  return point;
-};
-},{"./Proj":2,"./adjust_axis":3,"./common":4,"./datum_transform":12}],46:[function(require,module,exports){
-module.exports = '1.5.0-dev.2';
-},{}],47:[function(require,module,exports){
-var common = require('./common');
-var extend = require('./extend');
-
-function mapit(obj, key, v) {
-  obj[key] = v.map(function(aa) {
-    var o = {};
-    sExpr(aa, o);
-    return o;
-  }).reduce(function(a, b) {
-    return extend(a, b);
-  }, {});
+  return arr
 }
 
-function sExpr(v, obj) {
-  var key;
-  if (!Array.isArray(v)) {
-    obj[v] = true;
-    return;
+var INVALID_BASE64_RE = /[^+\/0-9A-z]/g
+
+function base64clean (str) {
+  // Node strips out invalid characters like \n and \t from the string, base64-js does not
+  str = stringtrim(str).replace(INVALID_BASE64_RE, '')
+  // Node allows for non-padded base64 strings (missing trailing ===), base64-js does not
+  while (str.length % 4 !== 0) {
+    str = str + '='
   }
-  else {
-    key = v.shift();
-    if (key === 'PARAMETER') {
-      key = v.shift();
-    }
-    if (v.length === 1) {
-      if (Array.isArray(v[0])) {
-        obj[key] = {};
-        sExpr(v[0], obj[key]);
-      }
-      else {
-        obj[key] = v[0];
-      }
-    }
-    else if (!v.length) {
-      obj[key] = true;
-    }
-    else if (key === 'TOWGS84') {
-      obj[key] = v;
-    }
-    else {
-      obj[key] = {};
-      if (['UNIT', 'PRIMEM', 'VERT_DATUM'].indexOf(key) > -1) {
-        obj[key] = {
-          name: v[0].toLowerCase(),
-          convert: v[1]
-        };
-        if (v.length === 3) {
-          obj[key].auth = v[2];
-        }
-      }
-      else if (key === 'SPHEROID') {
-        obj[key] = {
-          name: v[0],
-          a: v[1],
-          rf: v[2]
-        };
-        if (v.length === 4) {
-          obj[key].auth = v[3];
-        }
-      }
-      else if (['GEOGCS', 'GEOCCS', 'DATUM', 'VERT_CS', 'COMPD_CS', 'LOCAL_CS', 'FITTED_CS', 'LOCAL_DATUM'].indexOf(key) > -1) {
-        v[0] = ['name', v[0]];
-        mapit(obj, key, v);
-      }
-      else if (v.every(function(aa) {
-        return Array.isArray(aa);
-      })) {
-        mapit(obj, key, v);
-      }
-      else {
-        sExpr(v, obj[key]);
+  return str
+}
+
+function stringtrim (str) {
+  if (str.trim) return str.trim()
+  return str.replace(/^\s+|\s+$/g, '')
+}
+
+function isArrayish (subject) {
+  return isArray(subject) || Buffer.isBuffer(subject) ||
+      subject && typeof subject === 'object' &&
+      typeof subject.length === 'number'
+}
+
+function toHex (n) {
+  if (n < 16) return '0' + n.toString(16)
+  return n.toString(16)
+}
+
+function utf8ToBytes (str) {
+  var byteArray = []
+  for (var i = 0; i < str.length; i++) {
+    var b = str.charCodeAt(i)
+    if (b <= 0x7F) {
+      byteArray.push(b)
+    } else {
+      var start = i
+      if (b >= 0xD800 && b <= 0xDFFF) i++
+      var h = encodeURIComponent(str.slice(start, i+1)).substr(1).split('%')
+      for (var j = 0; j < h.length; j++) {
+        byteArray.push(parseInt(h[j], 16))
       }
     }
+  }
+  return byteArray
+}
+
+function asciiToBytes (str) {
+  var byteArray = []
+  for (var i = 0; i < str.length; i++) {
+    // Node's code seems to be doing this and not & 0x7F..
+    byteArray.push(str.charCodeAt(i) & 0xFF)
+  }
+  return byteArray
+}
+
+function utf16leToBytes (str) {
+  var c, hi, lo
+  var byteArray = []
+  for (var i = 0; i < str.length; i++) {
+    c = str.charCodeAt(i)
+    hi = c >> 8
+    lo = c % 256
+    byteArray.push(lo)
+    byteArray.push(hi)
+  }
+
+  return byteArray
+}
+
+function base64ToBytes (str) {
+  return base64.toByteArray(str)
+}
+
+function blitBuffer (src, dst, offset, length) {
+  for (var i = 0; i < length; i++) {
+    if ((i + offset >= dst.length) || (i >= src.length))
+      break
+    dst[i + offset] = src[i]
+  }
+  return i
+}
+
+function decodeUtf8Char (str) {
+  try {
+    return decodeURIComponent(str)
+  } catch (err) {
+    return String.fromCharCode(0xFFFD) // UTF 8 invalid char
   }
 }
 
-function rename(obj, params) {
-  var outName = params[0];
-  var inName = params[1];
-  if (!(outName in obj) && (inName in obj)) {
-    obj[outName] = obj[inName];
-    if (params.length === 3) {
-      obj[outName] = params[2](obj[outName]);
-    }
-  }
-}
+},{"base64-js":114,"ieee754":115,"is-array":116}],114:[function(require,module,exports){
+var lookup = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
-function d2r(input) {
-  return input * common.D2R;
-}
+;(function (exports) {
+	'use strict';
 
-function cleanWKT(wkt) {
-  if (wkt.type === 'GEOGCS') {
-    wkt.projName = 'longlat';
-  }
-  else if (wkt.type === 'LOCAL_CS') {
-    wkt.projName = 'identity';
-    wkt.local = true;
-  }
-  else {
-    if (typeof wkt.PROJECTION === "object") {
-      wkt.projName = Object.keys(wkt.PROJECTION)[0];
-    }
-    else {
-      wkt.projName = wkt.PROJECTION;
-    }
-  }
-  if (wkt.UNIT) {
-    wkt.units = wkt.UNIT.name.toLowerCase();
-    if (wkt.units === 'metre') {
-      wkt.units = 'meter';
-    }
-    if (wkt.UNIT.convert) {
-      wkt.to_meter = parseFloat(wkt.UNIT.convert, 10);
-    }
-  }
+  var Arr = (typeof Uint8Array !== 'undefined')
+    ? Uint8Array
+    : Array
 
-  if (wkt.GEOGCS) {
-    //if(wkt.GEOGCS.PRIMEM&&wkt.GEOGCS.PRIMEM.convert){
-    //  wkt.from_greenwich=wkt.GEOGCS.PRIMEM.convert*common.D2R;
-    //}
-    if (wkt.GEOGCS.DATUM) {
-      wkt.datumCode = wkt.GEOGCS.DATUM.name.toLowerCase();
-    }
-    else {
-      wkt.datumCode = wkt.GEOGCS.name.toLowerCase();
-    }
-    if (wkt.datumCode.slice(0, 2) === 'd_') {
-      wkt.datumCode = wkt.datumCode.slice(2);
-    }
-    if (wkt.datumCode === 'new_zealand_geodetic_datum_1949' || wkt.datumCode === 'new_zealand_1949') {
-      wkt.datumCode = 'nzgd49';
-    }
-    if (wkt.datumCode === "wgs_1984") {
-      if (wkt.PROJECTION === 'Mercator_Auxiliary_Sphere') {
-        wkt.sphere = true;
-      }
-      wkt.datumCode = 'wgs84';
-    }
-    if (wkt.datumCode.slice(-6) === '_ferro') {
-      wkt.datumCode = wkt.datumCode.slice(0, - 6);
-    }
-    if (wkt.datumCode.slice(-8) === '_jakarta') {
-      wkt.datumCode = wkt.datumCode.slice(0, - 8);
-    }
-    if (wkt.GEOGCS.DATUM && wkt.GEOGCS.DATUM.SPHEROID) {
-      wkt.ellps = wkt.GEOGCS.DATUM.SPHEROID.name.replace('_19', '').replace(/[Cc]larke\_18/, 'clrk');
-      if (wkt.ellps.toLowerCase().slice(0, 13) === "international") {
-        wkt.ellps = 'intl';
-      }
+	var PLUS   = '+'.charCodeAt(0)
+	var SLASH  = '/'.charCodeAt(0)
+	var NUMBER = '0'.charCodeAt(0)
+	var LOWER  = 'a'.charCodeAt(0)
+	var UPPER  = 'A'.charCodeAt(0)
 
-      wkt.a = wkt.GEOGCS.DATUM.SPHEROID.a;
-      wkt.rf = parseFloat(wkt.GEOGCS.DATUM.SPHEROID.rf, 10);
-    }
-  }
-  if (wkt.b && !isFinite(wkt.b)) {
-    wkt.b = wkt.a;
-  }
-
-  function toMeter(input) {
-    var ratio = wkt.to_meter || 1;
-    return parseFloat(input, 10) * ratio;
-  }
-  var renamer = function(a) {
-    return rename(wkt, a);
-  };
-  var list = [
-    ['standard_parallel_1', 'Standard_Parallel_1'],
-    ['standard_parallel_2', 'Standard_Parallel_2'],
-    ['false_easting', 'False_Easting'],
-    ['false_northing', 'False_Northing'],
-    ['central_meridian', 'Central_Meridian'],
-    ['latitude_of_origin', 'Latitude_Of_Origin'],
-    ['scale_factor', 'Scale_Factor'],
-    ['k0', 'scale_factor'],
-    ['latitude_of_center', 'Latitude_of_center'],
-    ['lat0', 'latitude_of_center', d2r],
-    ['longitude_of_center', 'Longitude_Of_Center'],
-    ['longc', 'longitude_of_center', d2r],
-    ['x0', 'false_easting', toMeter],
-    ['y0', 'false_northing', toMeter],
-    ['long0', 'central_meridian', d2r],
-    ['lat0', 'latitude_of_origin', d2r],
-    ['lat0', 'standard_parallel_1', d2r],
-    ['lat1', 'standard_parallel_1', d2r],
-    ['lat2', 'standard_parallel_2', d2r],
-    ['alpha', 'azimuth', d2r],
-    ['srsCode', 'name']
-  ];
-  list.forEach(renamer);
-  if (!wkt.long0 && wkt.longc && (wkt.PROJECTION === 'Albers_Conic_Equal_Area' || wkt.PROJECTION === "Lambert_Azimuthal_Equal_Area")) {
-    wkt.long0 = wkt.longc;
-  }
-}
-module.exports = function(wkt, self) {
-  var lisp = JSON.parse(("," + wkt).replace(/\s*\,\s*([A-Z_0-9]+?)(\[)/g, ',["$1",').slice(1).replace(/\s*\,\s*([A-Z_0-9]+?)\]/g, ',"$1"]'));
-  var type = lisp.shift();
-  var name = lisp.shift();
-  lisp.unshift(['name', name]);
-  lisp.unshift(['type', type]);
-  lisp.unshift('output');
-  var obj = {};
-  sExpr(lisp, obj);
-  cleanWKT(obj.output);
-  return extend(self, obj.output);
-};
-
-},{"./common":4,"./extend":14}]},{},[16])
-(16)
-});
-;
-});
-require.register("calvinmetcalf-parseDBF/index.js", function(exports, require, module){
-function dbfHeader(buffer){
-	var data = new DataView(buffer);
-	var out = {};
-	out.lastUpdated = new Date(data.getUint8(1,true)+1900,data.getUint8(2,true),data.getUint8(3,true));
-	out.records = data.getUint32(4,true);
-	out.headerLen = data.getUint16(8,true);
-	out.recLen = data.getUint16(10,true);
-	return out;
-}
-
-function dbfRowHeader(buffer){
-	var data = new DataView(buffer);
-	var out = [];
-	var offset = 32;
-	while(true){
-		out.push({
-			name : String.fromCharCode.apply(this,(new Uint8Array(buffer,offset,10))).replace(/\0|\s+$/g,''),
-			dataType : String.fromCharCode(data.getUint8(offset+11)),
-			len : data.getUint8(offset+16),
-			decimal : data.getUint8(offset+17)
-		});
-		if(data.getUint8(offset+32)===13){
-			break;
-		}else{
-			offset+=32;
-		}
+	function decode (elt) {
+		var code = elt.charCodeAt(0)
+		if (code === PLUS)
+			return 62 // '+'
+		if (code === SLASH)
+			return 63 // '/'
+		if (code < NUMBER)
+			return -1 //no match
+		if (code < NUMBER + 10)
+			return code - NUMBER + 26 + 26
+		if (code < UPPER + 26)
+			return code - UPPER
+		if (code < LOWER + 26)
+			return code - LOWER + 26
 	}
-	return out;
-}
-function rowFuncs(buffer,offset,len,type){
-	var data = (new Uint8Array(buffer,offset,len));
-	var textData = String.fromCharCode.apply(this,data).replace(/\0|\s+$/g,'');
-	switch(type){
-		case 'N':
-		case 'F':
-		case 'O':
-			return parseFloat(textData,10);
-		case 'D':
-			return new Date(textData.slice(0,4), parseInt(textData.slice(4,6),10)-1, textData.slice(6,8));
-		case 'L':
-			return textData.toLowerCase() === 'y' || textData.toLowerCase() === 't';
-		default:
-			return textData;
-	}
-}
-function parseRow(buffer,offset,rowHeaders){
-	var out={};
-	var i = 0;
-	var len = rowHeaders.length;
-	var field;
-	var header;
-	while(i<len){
-		header = rowHeaders[i];
-		field = rowFuncs(buffer,offset,header.len,header.dataType);
-		offset += header.len;
-		if(typeof field !== 'undefined'){
-			out[header.name]=field;
+
+	function b64ToByteArray (b64) {
+		var i, j, l, tmp, placeHolders, arr
+
+		if (b64.length % 4 > 0) {
+			throw new Error('Invalid string. Length must be a multiple of 4')
 		}
-		i++;
+
+		// the number of equal signs (place holders)
+		// if there are two placeholders, than the two characters before it
+		// represent one byte
+		// if there is only one, then the three characters before it represent 2 bytes
+		// this is just a cheap hack to not do indexOf twice
+		var len = b64.length
+		placeHolders = '=' === b64.charAt(len - 2) ? 2 : '=' === b64.charAt(len - 1) ? 1 : 0
+
+		// base64 is 4/3 + up to two characters of the original data
+		arr = new Arr(b64.length * 3 / 4 - placeHolders)
+
+		// if there are placeholders, only get up to the last complete 4 chars
+		l = placeHolders > 0 ? b64.length - 4 : b64.length
+
+		var L = 0
+
+		function push (v) {
+			arr[L++] = v
+		}
+
+		for (i = 0, j = 0; i < l; i += 4, j += 3) {
+			tmp = (decode(b64.charAt(i)) << 18) | (decode(b64.charAt(i + 1)) << 12) | (decode(b64.charAt(i + 2)) << 6) | decode(b64.charAt(i + 3))
+			push((tmp & 0xFF0000) >> 16)
+			push((tmp & 0xFF00) >> 8)
+			push(tmp & 0xFF)
+		}
+
+		if (placeHolders === 2) {
+			tmp = (decode(b64.charAt(i)) << 2) | (decode(b64.charAt(i + 1)) >> 4)
+			push(tmp & 0xFF)
+		} else if (placeHolders === 1) {
+			tmp = (decode(b64.charAt(i)) << 10) | (decode(b64.charAt(i + 1)) << 4) | (decode(b64.charAt(i + 2)) >> 2)
+			push((tmp >> 8) & 0xFF)
+			push(tmp & 0xFF)
+		}
+
+		return arr
 	}
-	return out;
-}
-module.exports = function(buffer){
-	var rowHeaders = dbfRowHeader(buffer);
-	var header = dbfHeader(buffer);
-	var offset = ((rowHeaders.length+1)<<5)+2;
-	var recLen = header.recLen;
-	var records = header.records;
-	var out = [];
-	while(records){
-		out.push(parseRow(buffer,offset,rowHeaders));
-		offset += recLen;
-		records--;
+
+	function uint8ToBase64 (uint8) {
+		var i,
+			extraBytes = uint8.length % 3, // if we have 1 byte left, pad 2 bytes
+			output = "",
+			temp, length
+
+		function encode (num) {
+			return lookup.charAt(num)
+		}
+
+		function tripletToBase64 (num) {
+			return encode(num >> 18 & 0x3F) + encode(num >> 12 & 0x3F) + encode(num >> 6 & 0x3F) + encode(num & 0x3F)
+		}
+
+		// go through the array every three bytes, we'll deal with trailing stuff later
+		for (i = 0, length = uint8.length - extraBytes; i < length; i += 3) {
+			temp = (uint8[i] << 16) + (uint8[i + 1] << 8) + (uint8[i + 2])
+			output += tripletToBase64(temp)
+		}
+
+		// pad the end with zeros, but make sure to not forget the extra bytes
+		switch (extraBytes) {
+			case 1:
+				temp = uint8[uint8.length - 1]
+				output += encode(temp >> 2)
+				output += encode((temp << 4) & 0x3F)
+				output += '=='
+				break
+			case 2:
+				temp = (uint8[uint8.length - 2] << 8) + (uint8[uint8.length - 1])
+				output += encode(temp >> 10)
+				output += encode((temp >> 4) & 0x3F)
+				output += encode((temp << 2) & 0x3F)
+				output += '='
+				break
+		}
+
+		return output
 	}
-	return out;
+
+	exports.toByteArray = b64ToByteArray
+	exports.fromByteArray = uint8ToBase64
+}(typeof exports === 'undefined' ? (this.base64js = {}) : exports))
+
+},{}],115:[function(require,module,exports){
+exports.read = function(buffer, offset, isLE, mLen, nBytes) {
+  var e, m,
+      eLen = nBytes * 8 - mLen - 1,
+      eMax = (1 << eLen) - 1,
+      eBias = eMax >> 1,
+      nBits = -7,
+      i = isLE ? (nBytes - 1) : 0,
+      d = isLE ? -1 : 1,
+      s = buffer[offset + i];
+
+  i += d;
+
+  e = s & ((1 << (-nBits)) - 1);
+  s >>= (-nBits);
+  nBits += eLen;
+  for (; nBits > 0; e = e * 256 + buffer[offset + i], i += d, nBits -= 8);
+
+  m = e & ((1 << (-nBits)) - 1);
+  e >>= (-nBits);
+  nBits += mLen;
+  for (; nBits > 0; m = m * 256 + buffer[offset + i], i += d, nBits -= 8);
+
+  if (e === 0) {
+    e = 1 - eBias;
+  } else if (e === eMax) {
+    return m ? NaN : ((s ? -1 : 1) * Infinity);
+  } else {
+    m = m + Math.pow(2, mLen);
+    e = e - eBias;
+  }
+  return (s ? -1 : 1) * m * Math.pow(2, e - mLen);
 };
 
-});
-require.register("shp/lib/index.js", function(exports, require, module){
-var proj4 = require('proj4');
-var unzip = require('./unzip');
-var binaryAjax = require('./binaryajax');
-var parseShp = require('./parseShp');
-var parseDbf = require('parsedbf');
-var promise = require('lie');
+exports.write = function(buffer, value, offset, isLE, mLen, nBytes) {
+  var e, m, c,
+      eLen = nBytes * 8 - mLen - 1,
+      eMax = (1 << eLen) - 1,
+      eBias = eMax >> 1,
+      rt = (mLen === 23 ? Math.pow(2, -24) - Math.pow(2, -77) : 0),
+      i = isLE ? 0 : (nBytes - 1),
+      d = isLE ? 1 : -1,
+      s = value < 0 || (value === 0 && 1 / value < 0) ? 1 : 0;
 
-function shp(base, whiteList) {
-	return shp.getShapefile(base, whiteList);
-}
-shp.combine = function(arr) {
-	var out = {};
-	out.type = "FeatureCollection";
-	out.features = [];
-	var i = 0;
-	var len = arr[0].length;
-	while (i < len) {
-		out.features.push({
-			"type": "Feature",
-			"geometry": arr[0][i],
-			"properties": arr[1][i]
-		});
-		i++;
-	}
-	return out;
-};
-shp.parseZip = function(buffer, whiteList) {
-	var key;
-	var zip = unzip(buffer);
-	var names = [];
-	whiteList = whiteList || [];
-	for (key in zip) {
-		if (key.slice(-3).toLowerCase() === "shp") {
-			names.push(key.slice(0, - 4));
-		}
-		else if (key.slice(-3).toLowerCase() === "dbf") {
-			zip[key] = parseDbf(zip[key]);
-		}
-		else if (key.slice(-3).toLowerCase() === "prj") {
-			zip[key] = proj4(zip[key]);
-		}
-		else if (key.slice(-4).toLowerCase() === "json" || whiteList.indexOf(key.split('.').pop()) > -1) {
-			names.push(key);
-		}
-	}
-	var geojson = names.map(function(name) {
-		var parsed;
-		if (name.slice(-4).toLowerCase() === "json") {
-			parsed = JSON.parse(zip[name]);
-			parsed.fileName = name.slice(0, name.lastIndexOf('.'));
-		}
-		else if (whiteList.indexOf(name.slice(name.lastIndexOf('.') + 1)) > -1) {
-			parsed = zip[name];
-			parsed.fileName = name;
-		}
-		else {
-			parsed = shp.combine([parseShp(zip[name + '.shp'], zip[name + '.prj']), zip[name + '.dbf']]);
-			parsed.fileName = name;
-		}
-		return parsed;
-	});
-	if (geojson.length === 1) {
-		return geojson[0];
-	}
-	else {
-		return geojson;
-	}
+  value = Math.abs(value);
+
+  if (isNaN(value) || value === Infinity) {
+    m = isNaN(value) ? 1 : 0;
+    e = eMax;
+  } else {
+    e = Math.floor(Math.log(value) / Math.LN2);
+    if (value * (c = Math.pow(2, -e)) < 1) {
+      e--;
+      c *= 2;
+    }
+    if (e + eBias >= 1) {
+      value += rt / c;
+    } else {
+      value += rt * Math.pow(2, 1 - eBias);
+    }
+    if (value * c >= 2) {
+      e++;
+      c /= 2;
+    }
+
+    if (e + eBias >= eMax) {
+      m = 0;
+      e = eMax;
+    } else if (e + eBias >= 1) {
+      m = (value * c - 1) * Math.pow(2, mLen);
+      e = e + eBias;
+    } else {
+      m = value * Math.pow(2, eBias - 1) * Math.pow(2, mLen);
+      e = 0;
+    }
+  }
+
+  for (; mLen >= 8; buffer[offset + i] = m & 0xff, i += d, m /= 256, mLen -= 8);
+
+  e = (e << mLen) | m;
+  eLen += mLen;
+  for (; eLen > 0; buffer[offset + i] = e & 0xff, i += d, e /= 256, eLen -= 8);
+
+  buffer[offset + i - d] |= s * 128;
 };
 
-function getZip(base, whiteList) {
-	return binaryAjax(base).then(function(a) {
-		return shp.parseZip(a, whiteList);
-	});
-}
-shp.getShapefile = function(base, whiteList) {
-	if (typeof base === 'string') {
-		if (base.slice(-4) === '.zip') {
-			return getZip(base, whiteList);
-		}
-		else {
-			return binaryAjax.all([
-				binaryAjax.all([
-				binaryAjax(base + '.shp'),
-				binaryAjax(base + '.prj')]).then(function(args) {
-					return parseShp(args[0], args[1] ? proj4(args[1]) : false);
-				}),
-				binaryAjax(base + '.dbf').then(parseDbf)
-			]).then(shp.combine);
-		}
-	}
-	else {
-		return promise(function(resolve) {
-			resolve(shp.parseZip(base));
-		});
-	}
-};
-module.exports = shp;
+},{}],116:[function(require,module,exports){
 
-});
-require.register("shp/lib/binaryajax.js", function(exports, require, module){
-var promise = require('lie');
-function binaryAjax(url){
-	return promise(function(resolve,reject){
-		var type = url.slice(-3);
-		var ajax = new XMLHttpRequest();
-		ajax.open("GET",url,true);
-		if(type !== 'prj'){
-			ajax.responseType='arraybuffer';
-		}
-		ajax.addEventListener("load",function(){
-			if(ajax.status>399){
-				if(type==='prj'){
-					return resolve(false);
-				}else{
-					return reject(ajax.status);
-				}
-			}
-			resolve(ajax.response);
-		}, false);
-		ajax.send();
-	});
-}
-binaryAjax.all = function(array) {
-    return promise(function(resolve,reject){
-        var len = array.length;
-        var resolved = 0;
-        var out = [];
-        var onSuccess = function(n) {
-            return function(v) {
-                out[n] = v;
-                resolved++;
-                if (resolved === len) {
-                    resolve(out);
-                }
-            };
-        };
-        array.forEach(function(v, i) {
-            v.then(onSuccess(i), function(a) {
-                reject(a);
+/**
+ * isArray
+ */
+
+var isArray = Array.isArray;
+
+/**
+ * toString
+ */
+
+var str = Object.prototype.toString;
+
+/**
+ * Whether or not the given `val`
+ * is an array.
+ *
+ * example:
+ *
+ *        isArray([]);
+ *        // > true
+ *        isArray(arguments);
+ *        // > false
+ *        isArray('');
+ *        // > false
+ *
+ * @param {mixed} val
+ * @return {bool}
+ */
+
+module.exports = isArray || function (val) {
+  return !! val && '[object Array]' == str.call(val);
+};
+
+},{}],117:[function(require,module,exports){
+// shim for using process in browser
+
+var process = module.exports = {};
+
+process.nextTick = (function () {
+    var canSetImmediate = typeof window !== 'undefined'
+    && window.setImmediate;
+    var canMutationObserver = typeof window !== 'undefined'
+    && window.MutationObserver;
+    var canPost = typeof window !== 'undefined'
+    && window.postMessage && window.addEventListener
+    ;
+
+    if (canSetImmediate) {
+        return function (f) { return window.setImmediate(f) };
+    }
+
+    var queue = [];
+
+    if (canMutationObserver) {
+        var hiddenDiv = document.createElement("div");
+        var observer = new MutationObserver(function () {
+            var queueList = queue.slice();
+            queue.length = 0;
+            queueList.forEach(function (fn) {
+                fn();
             });
         });
-    });
-};
-module.exports = binaryAjax;
 
+        observer.observe(hiddenDiv, { attributes: true });
+
+        return function nextTick(fn) {
+            if (!queue.length) {
+                hiddenDiv.setAttribute('yes', 'no');
+            }
+            queue.push(fn);
+        };
+    }
+
+    if (canPost) {
+        window.addEventListener('message', function (ev) {
+            var source = ev.source;
+            if ((source === window || source === null) && ev.data === 'process-tick') {
+                ev.stopPropagation();
+                if (queue.length > 0) {
+                    var fn = queue.shift();
+                    fn();
+                }
+            }
+        }, true);
+
+        return function nextTick(fn) {
+            queue.push(fn);
+            window.postMessage('process-tick', '*');
+        };
+    }
+
+    return function nextTick(fn) {
+        setTimeout(fn, 0);
+    };
+})();
+
+process.title = 'browser';
+process.browser = true;
+process.env = {};
+process.argv = [];
+
+function noop() {}
+
+process.on = noop;
+process.addListener = noop;
+process.once = noop;
+process.off = noop;
+process.removeListener = noop;
+process.removeAllListeners = noop;
+process.emit = noop;
+
+process.binding = function (name) {
+    throw new Error('process.binding is not supported');
+};
+
+// TODO(shtylman)
+process.cwd = function () { return '/' };
+process.chdir = function (dir) {
+    throw new Error('process.chdir is not supported');
+};
+
+},{}]},{},[2])(2)
 });
-require.register("shp/lib/parseShp.js", function(exports, require, module){
-
-function isClockWise(array){
-	var sum = 0;
-	var i = 1;
-	var len = array.length;
-	var prev,cur;
-	while(i<len){
-		prev = cur||array[0];
-		cur = array[i];
-		sum += ((cur[0]-prev[0])*(cur[1]+prev[1]));
-		i++;
-	}
-	return sum > 0;
-}
-function polyReduce(a,b){
-	if(isClockWise(b)||!a.length){
-		a.push([b]);
-	}else{
-		a[a.length-1].push(b);
-	}
-	return a;
-}
-ParseShp.prototype.parsePoint = function (data){
-	return {
-		"type": "Point",
-		"coordinates":this.parseCoord(data,0)
-	};
-};
-ParseShp.prototype.parseZPoint = function (data){
-	var pointXY = this.parsePoint(data);
-	pointXY.coordinates.push(this.parseCoord(data,16));
-	return pointXY;
-};
-ParseShp.prototype.parsePointArray = function (data,offset,num){
-	var out = [];
-	var done = 0;
-	while(done<num){
-		out.push(this.parseCoord(data,offset));
-		offset += 16;
-		done++;
-	}
-	return out;
-};
-ParseShp.prototype.parseZPointArray = function (data,zOffset,num,coordinates){
-	var i = 0;
-	while(i<num){
-		coordinates[i].push(data.getFloat64(zOffset,true));
-		i++;
-		zOffset += 8;
-	}
-	return coordinates;
-};
-ParseShp.prototype.parseArrayGroup = function (data,offset,partOffset,num,tot){
-	var out = [];
-	var done = 0;
-	var curNum,nextNum=0,pointNumber;
-	while(done<num){
-		done++;
-		partOffset += 4;
-		curNum = nextNum;
-		if(done===num){
-			nextNum = tot;
-		}else{
-			nextNum = data.getInt32(partOffset,true);
-		}
-		pointNumber = nextNum - curNum;
-		if(!pointNumber){
-			continue;
-		}
-		out.push(this.parsePointArray(data,offset,pointNumber));
-		offset += (pointNumber<<4);
-	}
-	return out;
-};
-ParseShp.prototype.parseZArrayGroup = function(data,zOffset,num,coordinates){
-	var i = 0;
-	while(i<num){
-		coordinates[i] = this.parseZPointArray(data,zOffset,coordinates[i].length,coordinates[i]);
-		zOffset += (coordinates[i].length<<3);
-		i++;
-	}
-	return coordinates;
-};
-ParseShp.prototype.parseMultiPoint = function (data){
-	var out = {};
-	out.bbox = [
-		data.getFloat64(0,true),
-		data.getFloat64(8,true),
-		data.getFloat64(16,true),
-		data.getFloat64(24,true)
-	];
-	var num = data.getInt32(32,true);
-	var offset = 36;
-	if(num===1){
-		out.type = "Point";
-		out.coordinates = this.parseCoord(data,offset);
-	}else{
-		out.type = "MultiPoint";
-		out.coordinates = this.parsePointArray(data,offset,num);
-	}
-	return out;
-};
-ParseShp.prototype.parseZMultiPoint = function(data){
-	var geoJson = this.parseMultiPoint(data);
-	var num;
-	if(geoJson.type === "Point"){
-		geoJson.coordinates.push(data.getFloat64(72,true));
-		return geoJson;
-	}else{
-		num = geoJson.coordinates.length;
-	}
-	var zOffset = 56 + (num<<4);
-	geoJson.coordinates =  this.parseZPointArray(data,zOffset,num,geoJson.coordinates);
-	return geoJson;
-};
-ParseShp.prototype.parsePolyline = function (data){
-	var out = {};
-	out.bbox = [
-		data.getFloat64(0,true),
-		data.getFloat64(8,true),
-		data.getFloat64(16,true),
-		data.getFloat64(24,true)
-	];
-	var numParts = data.getInt32(32,true);
-	var num = data.getInt32(36,true);
-	var offset,partOffset;
-	if(numParts === 1){
-		out.type = "LineString";
-		offset = 44;
-		out.coordinates = this.parsePointArray(data,offset,num);
-	}else{
-		out.type = "MultiLineString";
-		offset = 40 + (numParts<<2);
-		partOffset = 40;
-		out.coordinates = this.parseArrayGroup(data,offset,partOffset,numParts,num);
-	}
-	return out;
-};
-ParseShp.prototype.parseZPolyline = function(data){
-	var geoJson = this.parsePolyline(data);
-	var num = geoJson.coordinates.length;
-	var zOffset = 60 + (num<<4);
-	if(geoJson.type === "LineString"){
-		geoJson.coordinates =  this.parseZPointArray(data,zOffset,num,geoJson.coordinates);
-		return geoJson;
-	}else{
-		geoJson.coordinates =  this.parseZArrayGroup(data,zOffset,num,geoJson.coordinates);
-		return geoJson;
-	}
-};
-ParseShp.prototype.polyFuncs = function (out){
-	if(out.type === "LineString"){
-		out.type = "Polygon";
-		out.coordinates = [out.coordinates];
-		return out;
-	}else{
-		out.coordinates = out.coordinates.reduce(polyReduce,[]);
-		if(out.coordinates.length === 1){
-			out.type = "Polygon";
-			out.coordinates = out.coordinates[0];
-			return out;
-		}else{
-			out.type = "MultiPolygon";
-			return out;
-		}
-	}
-};
-ParseShp.prototype.parsePolygon = function (data){
-	return this.polyFuncs(this.parsePolyline(data));
-};
-ParseShp.prototype.parseZPolygon = function(data){
-	return this.polyFuncs(this.parseZPolyline(data));
-};
-var shpFuncObj = {
-	1:'parsePoint',
-	3:'parsePolyline',
-	5:'parsePolygon',
-	8:'parseMultiPoint',
-	11:'parseZPoint',
-	13:'parseZPolyline',
-	15:'parseZPolygon',
-	18:'parseZMultiPoint'
-};
-
-
-
-function makeParseCoord(trans){
-	if(trans){
-		return function(data,offset){
-			return trans.inverse([data.getFloat64(offset,true),data.getFloat64(offset+8,true)]);
-		};
-	}else{
-		return function(data,offset){
-			return [data.getFloat64(offset,true),data.getFloat64(offset+8,true)];
-		};
-	}
-}
-function ParseShp(buffer,trans){
-	if(!(this instanceof ParseShp)){
-		return new ParseShp(buffer,trans);
-	}
-	this.buffer = buffer;
-	this.shpFuncs(trans);
-	this.rows = this.getRows();
-}
-ParseShp.prototype.shpFuncs = function (tran){
-	var num = this.getShpCode();
-	if(num>20){
-		num -= 20;
-	}
-	if(!(num in shpFuncObj)){
-		console.log("I don't know that shp type");
-		return function(){
-			return function(){};
-		};
-	}
-	this.parseFunc = this[shpFuncObj[num]];
-	this.parseCoord = makeParseCoord(tran);
-};
-ParseShp.prototype.getShpCode = function(){
-	return this.parseHeader().shpCode;
-};
-ParseShp.prototype.parseHeader = function (){
-	var view = new DataView(this.buffer,0,100) ;
-	return {
-		length : view.getInt32(6<<2,false),
-		version : view.getInt32(7<<2,true),
-		shpCode : view.getInt32(8<<2,true),
-		bbox : [
-			view.getFloat64(9<<2,true),
-			view.getFloat64(11<<2,true),
-			view.getFloat64(13<<2,true),
-			view.getFloat64(13<<2,true)
-		]
-	};
-};
-ParseShp.prototype.getRows = function(){
-	var offset=100;
-	var len = this.buffer.byteLength;
-	var out = [];
-	var current;
-	while(offset<len){
-		current = this.getRow(offset);
-		offset += 8;
-		offset += current.len;
-		if(current.type){
-			out.push(this.parseFunc(current.data));
-		}
-	}
-	return out;
-};
-ParseShp.prototype.getRow = function(offset){
-	var view = new DataView(this.buffer,offset,12);
-	var len = view.getInt32(4,false)<<1;
-	var data = new DataView(this.buffer,offset+12,len-4);
-	
-	return {
-		id:view.getInt32(0,false),
-		len:len,
-		data:data,
-		type:view.getInt32(8,true)
-	};
-};
-module.exports = function(buffer,trans){
-	return ParseShp(buffer,trans).rows;
-};
-});
-require.register("shp/lib/unzip.js", function(exports, require, module){
-var JSZip = require('jszip');
-module.exports = function(buffer) {
-	var zip = new JSZip(buffer);
-	var files = zip.file(/.+/);
-	var out = {};
-	files.forEach(function(a) {
-		if (a.name.slice(-3).toLowerCase() === "shp" || a.name.slice(-3).toLowerCase() === "dbf") {
-			out[a.name] = a.asText();
-			out[a.name] = a.asArrayBuffer();
-		}
-		else {
-			out[a.name] = a.asText();
-		}
-	});
-	return out;
-};
-
-});
-require.alias("calvinmetcalf-lie/lie.js", "shp/deps/lie/lie.js");
-require.alias("calvinmetcalf-lie/lie.js", "shp/deps/lie/index.js");
-require.alias("calvinmetcalf-lie/lie.js", "lie/index.js");
-require.alias("calvinmetcalf-setImmediate/lib/index.js", "calvinmetcalf-lie/deps/immediate/lib/index.js");
-require.alias("calvinmetcalf-setImmediate/lib/nextTick.js", "calvinmetcalf-lie/deps/immediate/lib/nextTick.js");
-require.alias("calvinmetcalf-setImmediate/lib/postMessage.js", "calvinmetcalf-lie/deps/immediate/lib/postMessage.js");
-require.alias("calvinmetcalf-setImmediate/lib/messageChannel.js", "calvinmetcalf-lie/deps/immediate/lib/messageChannel.js");
-require.alias("calvinmetcalf-setImmediate/lib/stateChange.js", "calvinmetcalf-lie/deps/immediate/lib/stateChange.js");
-require.alias("calvinmetcalf-setImmediate/lib/timeout.js", "calvinmetcalf-lie/deps/immediate/lib/timeout.js");
-require.alias("calvinmetcalf-setImmediate/lib/global.js", "calvinmetcalf-lie/deps/immediate/lib/global.js");
-require.alias("calvinmetcalf-setImmediate/lib/mutation.js", "calvinmetcalf-lie/deps/immediate/lib/mutation.js");
-require.alias("calvinmetcalf-setImmediate/lib/realSetImmediate.js", "calvinmetcalf-lie/deps/immediate/lib/realSetImmediate.js");
-require.alias("calvinmetcalf-setImmediate/lib/index.js", "calvinmetcalf-lie/deps/immediate/index.js");
-require.alias("calvinmetcalf-setImmediate/lib/index.js", "calvinmetcalf-setImmediate/index.js");
-
-require.alias("calvinmetcalf-lie/lie.js", "calvinmetcalf-lie/index.js");
-
-require.alias("calvinmetcalf-jszip/lib/base64.js", "shp/deps/jszip/lib/base64.js");
-require.alias("calvinmetcalf-jszip/lib/compressedObject.js", "shp/deps/jszip/lib/compressedObject.js");
-require.alias("calvinmetcalf-jszip/lib/compressions.js", "shp/deps/jszip/lib/compressions.js");
-require.alias("calvinmetcalf-jszip/lib/dataReader.js", "shp/deps/jszip/lib/dataReader.js");
-require.alias("calvinmetcalf-jszip/lib/defaults.js", "shp/deps/jszip/lib/defaults.js");
-require.alias("calvinmetcalf-jszip/lib/index.js", "shp/deps/jszip/lib/index.js");
-require.alias("calvinmetcalf-jszip/lib/load.js", "shp/deps/jszip/lib/load.js");
-require.alias("calvinmetcalf-jszip/lib/nodeBufferReader.js", "shp/deps/jszip/lib/nodeBufferReader.js");
-require.alias("calvinmetcalf-jszip/lib/object.js", "shp/deps/jszip/lib/object.js");
-require.alias("calvinmetcalf-jszip/lib/signature.js", "shp/deps/jszip/lib/signature.js");
-require.alias("calvinmetcalf-jszip/lib/stringReader.js", "shp/deps/jszip/lib/stringReader.js");
-require.alias("calvinmetcalf-jszip/lib/support.js", "shp/deps/jszip/lib/support.js");
-require.alias("calvinmetcalf-jszip/lib/uint8ArrayReader.js", "shp/deps/jszip/lib/uint8ArrayReader.js");
-require.alias("calvinmetcalf-jszip/lib/utils.js", "shp/deps/jszip/lib/utils.js");
-require.alias("calvinmetcalf-jszip/lib/zipEntries.js", "shp/deps/jszip/lib/zipEntries.js");
-require.alias("calvinmetcalf-jszip/lib/zipEntry.js", "shp/deps/jszip/lib/zipEntry.js");
-require.alias("calvinmetcalf-jszip/lib/flate/index.js", "shp/deps/jszip/lib/flate/index.js");
-require.alias("calvinmetcalf-jszip/lib/flate/deflate.js", "shp/deps/jszip/lib/flate/deflate.js");
-require.alias("calvinmetcalf-jszip/lib/flate/inflate.js", "shp/deps/jszip/lib/flate/inflate.js");
-require.alias("calvinmetcalf-jszip/lib/index.js", "shp/deps/jszip/index.js");
-require.alias("calvinmetcalf-jszip/lib/index.js", "jszip/index.js");
-require.alias("calvinmetcalf-jszip/lib/index.js", "calvinmetcalf-jszip/index.js");
-
-require.alias("proj4js-proj4js/dist/proj4.js", "shp/deps/proj4/dist/proj4.js");
-require.alias("proj4js-proj4js/dist/proj4.js", "shp/deps/proj4/index.js");
-require.alias("proj4js-proj4js/dist/proj4.js", "proj4/index.js");
-require.alias("proj4js-proj4js/dist/proj4.js", "proj4js-proj4js/index.js");
-
-require.alias("calvinmetcalf-parseDBF/index.js", "shp/deps/parsedbf/index.js");
-require.alias("calvinmetcalf-parseDBF/index.js", "shp/deps/parsedbf/index.js");
-require.alias("calvinmetcalf-parseDBF/index.js", "parsedbf/index.js");
-require.alias("calvinmetcalf-parseDBF/index.js", "calvinmetcalf-parseDBF/index.js");
-
-require.alias("shp/lib/index.js", "shp/index.js");
-
-if (typeof exports == "object") {
-  module.exports = require("shp");
-} else if (typeof define == "function" && define.amd) {
-  define(function(){ return require("shp"); });
-} else {
-  this["shp"] = require("shp");
-}})();
