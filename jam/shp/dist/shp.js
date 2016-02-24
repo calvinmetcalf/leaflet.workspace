@@ -38,11 +38,13 @@ var cache = new Cache({
 	max: 20
 });
 function shp(base, whiteList) {
-	if (cache.has(base)) {
+	if (typeof base === 'string' && cache.has(base)) {
 		return Promise.resolve(cache.get(base));
 	}
 	return shp.getShapefile(base, whiteList).then(function (resp) {
-		cache.set(base, resp);
+		if (typeof base === 'string') {
+			cache.set(base, resp);
+		}
 		return resp;
 	});
 }
@@ -415,7 +417,7 @@ ParseShp.prototype.getRow = function(offset){
 	var view = new DataView(this.buffer,offset,12);
 	var len = view.getInt32(4,false) << 1;
 	var data = new DataView(this.buffer,offset+12,len - 4);
-	
+
 	return {
 		id:view.getInt32(0,false),
 		len:len,
@@ -738,7 +740,7 @@ function JSZip(data, options) {
     //   "folder/" : {...},
     //   "folder/data.txt" : {...}
     // }
-    
+
     this.files = {};
 
     // Where we are in the hierarchy
@@ -1535,7 +1537,7 @@ var out = {
             default : // case "string" :
                return zip;
          }
-      
+
     },
 
     /**
@@ -2734,7 +2736,7 @@ function all(iterable) {
   var resolved = 0;
   var i = -1;
   var promise = new Promise(INTERNAL);
-  
+
   while (++i < len) {
     allResolver(iterable[i], i);
   }
@@ -2843,7 +2845,7 @@ Promise.prototype.then = function (onFulfilled, onRejected) {
   }
   var promise = new Promise(INTERNAL);
 
-  
+
   if (this.state !== states.PENDING) {
     var resolver = this.state === states.FULFILLED ? onFulfilled: onRejected;
     unwrap(promise, resolver, this.outcome);
@@ -2905,7 +2907,7 @@ function race(iterable) {
   var resolved = 0;
   var i = -1;
   var promise = new Promise(INTERNAL);
-  
+
   while (++i < len) {
     resolver(iterable[i]);
   }
@@ -2997,7 +2999,7 @@ function safelyResolveThenable(self, thenable) {
   function tryToUnwrap() {
     thenable(onSuccess, onError);
   }
-  
+
   var result = tryCatch(tryToUnwrap);
   if (result.status === 'error') {
     onError(result.value);
@@ -5527,7 +5529,7 @@ var qsfnz = require('../common/qsfnz');
 var msfnz = require('../common/msfnz');
 var iqsfnz = require('../common/iqsfnz');
 /*
-  reference:  
+  reference:
     "Cartographic Projection Procedures for the UNIX Environment-
     A User's Manual" by Gerald I. Evenden,
     USGS Open File Report 90-284and Release 4 Interim Reports (2003)
@@ -5839,10 +5841,10 @@ exports.forward = function(p) {
   else {
 
     // Point is in the opposing hemisphere and is unprojectable
-    // We still need to return a reasonable point, so we project 
-    // to infinity, on a bearing 
+    // We still need to return a reasonable point, so we project
+    // to infinity, on a bearing
     // equivalent to the northern hemisphere equivalent
-    // This is a reasonable approximation for short shapes and lines that 
+    // This is a reasonable approximation for short shapes and lines that
     // straddle the horizon.
 
     x = this.x0 + this.infinity_dist * cosphi * Math.sin(dlon);
