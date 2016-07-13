@@ -35,16 +35,13 @@ var m = L.map("map", {
         m.setView([32.69, 10.55], 3);
     }
     m.addHash();
-    var url = 'http://otile{s}.mqcdn.com/tiles/1.0.0/osm/{z}/{x}/{y}.jpeg';
+    var url = 'https://api.mapbox.com/styles/v1/mapbox/streets-v9/tiles/256/{z}/{x}/{y}?access_token=pk.eyJ1IjoiY3dtIiwiYSI6InFoYkpvS00ifQ.WHqQ_q865NKjIQB6Wpoi2w'
 
-    var attributionText = 'Tiles Courtesy of <a href="http://www.mapquest.com/">MapQuest</a> &mdash; Map data &copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+    var attributionText = '© <a href="https://www.mapbox.com/map-feedback/">Mapbox</a> © <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>';
 
-    var mapquestSubdomains = '1234';
 
     var optionsObject = {
-        attribution: attributionText,
-        subdomains: mapquestSubdomains
-    }
+        attribution: attributionText    }
 
     var mq = L.tileLayer(url, optionsObject);
     var watercolor = L.tileLayer('http://{s}.tile.stamen.com/watercolor/{z}/{x}/{y}.jpg', {
@@ -53,7 +50,7 @@ var m = L.map("map", {
     mq.addTo(m);
     var lc = L.control.layers({
         "Stamen Watercolor": watercolor,
-        "Map Quest Open": mq
+        "Mapbox Streets": mq
     }).addTo(m);
     //make the map
     var options = {
