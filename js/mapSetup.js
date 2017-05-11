@@ -35,13 +35,11 @@ var m = L.map("map", {
         m.setView([32.69, 10.55], 3);
     }
     m.addHash();
-    var url = 'https://api.mapbox.com/styles/v1/mapbox/streets-v9/tiles/256/{z}/{x}/{y}?access_token=pk.eyJ1IjoiY3dtIiwiYSI6InFoYkpvS00ifQ.WHqQ_q865NKjIQB6Wpoi2w'
+    var url = 'http://{s}.tile.stamen.com/toner/{z}/{x}/{y}.png'
 
-    var attributionText = '© <a href="https://www.mapbox.com/map-feedback/">Mapbox</a> © <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>';
-
-
-    var optionsObject = {
-        attribution: attributionText    }
+    var optionsObject ={
+        attribution: 'Map tiles by <a href="http://stamen.com">Stamen Design</a>, <a href="http://creativecommons.org/licenses/by/3.0">CC BY 3.0</a> &mdash; Map data &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors, <a href="http://creativecommons.org/licenses/by-sa/2.0/">CC-BY-SA</a>'
+    }
 
     var mq = L.tileLayer(url, optionsObject);
     var watercolor = L.tileLayer('http://{s}.tile.stamen.com/watercolor/{z}/{x}/{y}.jpg', {
@@ -50,7 +48,7 @@ var m = L.map("map", {
     mq.addTo(m);
     var lc = L.control.layers({
         "Stamen Watercolor": watercolor,
-        "Mapbox Streets": mq
+        "Stamen Toner": mq
     }).addTo(m);
     //make the map
     var options = {
